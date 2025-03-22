@@ -1,15 +1,19 @@
 import math
 import os
 import random
-from os import PathLike
-from typing import List, Optional, Type, Union
+import warnings
+from collections.abc import Iterable
+from typing import Any, Literal, Optional, Type, Union
 
 import numpy as np
+import pandas as pd
 import torch
 import torch.nn as nn
 from torch.profiler import ProfilerActivity, profile
 
-from bioplnn.typing import TensorInitFnType
+from bioplnn.typing import PathLikeType, TensorInitFnType
+
+SPARSE_TENSOR_WARNING_THRESHOLD = 0.2
 
 
 def manual_seed(seed: int):
@@ -80,7 +84,7 @@ def _get_single_activation_class(
 
 def get_activation_class(
     activation: Union[str, None],
-) -> Union[Type[nn.Module], List[Type[nn.Module]]]:
+) -> Union[Type[nn.Module], list[Type[nn.Module]]]:
     """Get one or more activation function classes.
 
     If activation is a string with commas, split and get each activation.
@@ -122,6 +126,34 @@ def get_activation(
         return nn.Sequential(*[act() for act in activation_classes])
     else:
         return activation_classes()
+
+
+def idx_1D_to_2D_tensor(x: torch.Tensor, m: int, n: int) -> torch.Tensor:
+    """Convert 1D indices to 2D coordinates.
+
+    Args:
+        x (torch.Tensor): 1D indices tensor.
+        m (int): Number of rows in the 2D grid.
+        n (int): Number of columns in the 2D grid.
+
+    Returns:
+        torch.Tensor: 2D coordinates tensor of shape (len(x), 2).
+    """
+    return torch.stack((x // m, x % n))
+
+
+def idx_2D_to_1D_tensor(x: torch.Tensor, m: int, n: int) -> torch.Tensor:
+    """Convert 2D coordinates to 1D indices.
+
+    Args:
+        x (torch.Tensor): 2D coordinates tensor of shape (N, 2).
+        m (int): Number of rows in the 2D grid.
+        n (int): Number of columns in the 2D grid.
+
+    Returns:
+        torch.Tensor: 1D indices tensor.
+    """
+    return x[0] * n + x[1]
 
 
 def init_tensor(
@@ -166,103 +198,188 @@ def init_tensor(
             raise e
 
 
-def load_tensor(tensor: Union[torch.Tensor, PathLike]) -> torch.Tensor:
-    """Load a tensor from a file or tensor.
+########################################################
+# Tensor and array loading
+########################################################
 
-    Args:
-        tensor (Union[torch.Tensor, PathLike]): Tensor or path to file
-            containing tensor.
 
-    Returns:
-        torch.Tensor: The original or loaded tensor.
+def _load_df_correct_index(
+    df: PathLikeType,
+) -> pd.DataFrame:
+    """Load a dataframe from a file."""
+    df_loaded = pd.read_csv(df)
+    if df_loaded.columns[0] == "Unnamed: 0":
+        df_loaded = pd.read_csv(df, index_col=0)
+    return df_loaded
+
+
+def _load_array_from_file(
+    path: PathLikeType,
+) -> np.ndarray:
+    """Load a numpy array from a file.
+
+    Supported file extensions:
+    - npy
+    - csv
+    - pt
     """
-    if isinstance(tensor, torch.Tensor):
-        return tensor
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"File {path} does not exist.")
+
+    if os.path.splitext(path)[1] in [".npy", ".npz"]:
+        return np.load(path)
+    elif os.path.splitext(path)[1] == ".csv":
+        return _load_df_correct_index(path).to_numpy()
+    elif os.path.splitext(path)[1] == ".pt":
+        return torch.load(path, weights_only=True).numpy()
     else:
-        return torch.load(tensor, weights_only=True).squeeze()
-
-
-def idx_1D_to_2D_tensor(x: torch.Tensor, m: int, n: int) -> torch.Tensor:
-    """Convert 1D indices to 2D coordinates.
-
-    Args:
-        x (torch.Tensor): 1D indices tensor.
-        m (int): Number of rows in the 2D grid.
-        n (int): Number of columns in the 2D grid.
-
-    Returns:
-        torch.Tensor: 2D coordinates tensor of shape (len(x), 2).
-    """
-    return torch.stack((x // m, x % n))
-
-
-def idx_2D_to_1D_tensor(x: torch.Tensor, m: int, n: int) -> torch.Tensor:
-    """Convert 2D coordinates to 1D indices.
-
-    Args:
-        x (torch.Tensor): 2D coordinates tensor of shape (N, 2).
-        m (int): Number of rows in the 2D grid.
-        n (int): Number of columns in the 2D grid.
-
-    Returns:
-        torch.Tensor: 1D indices tensor.
-    """
-    return x[0] * n + x[1]
-
-
-def print_cuda_mem_stats(device: Optional[torch.device] = None):
-    """Print CUDA memory statistics for debugging."""
-    f, t = torch.cuda.mem_get_info(device)
-    print(f"Free/Total: {f / (1024**3):.2f}GB/{t / (1024**3):.2f}GB")
-
-
-def count_parameters(model):
-    """Count the number of trainable parameters in a model.
-
-    Args:
-        model: PyTorch model.
-
-    Returns:
-        int: Number of trainable parameters.
-    """
-    total_params = 0
-    for param in model.parameters():
-        num_params = (
-            param._nnz()
-            if param.layout
-            in (torch.sparse_coo, torch.sparse_csr, torch.sparse_csc)
-            else param.numel()
+        raise ValueError(
+            f"file {path} has an unsupported extension. "
+            "Supported extensions: .npy, .csv, .pt"
         )
-        total_params += num_params
-    return total_params
 
 
-def profile_fn(
-    fn,
-    sort_by="cuda_time_total",
-    row_limit=50,
-    profile_kwargs={},
-    fn_kwargs={},
-):
-    """Profile a function with PyTorch's profiler.
+def _load_array_from_iterable(
+    iterable: Union[np.ndarray, torch.Tensor, pd.DataFrame, Iterable[Any]],
+) -> np.ndarray:
+    """Load a numpy array from an iterable.
+
+    Supported iterable types:
+    - torch.Tensor
+    - np.ndarray
+    - pd.DataFrame
+    - Iterable[Any]
+    """
+    if isinstance(iterable, np.ndarray):
+        return iterable
+    elif isinstance(iterable, torch.Tensor):
+        return iterable.numpy()
+    elif isinstance(iterable, pd.DataFrame):
+        return iterable.to_numpy()
+    else:
+        return np.array(iterable)
+
+
+def load_array(
+    array: Union[
+        np.ndarray, torch.Tensor, pd.DataFrame, Iterable[Any], PathLikeType
+    ],
+) -> np.ndarray:
+    """Load a numpy array from an array, iterable, or file.
+
+    Supported file formats:
+    - npz
+    - npy
+    - csv
+    - pt
 
     Args:
-        fn: Function to profile.
-        sort_by (str, optional): Column to sort results by. Defaults to
-            "cuda_time_total".
-        row_limit (int, optional): Maximum number of rows to display.
-            Defaults to 50.
-        **fn_kwargs: Keyword arguments to pass to the function.
+        array: numpy array, iterable, or path to file containing numpy array.
+
+    Returns:
+        The original or loaded numpy array.
+
+    Raises:
+        ValueError: If the array cannot be loaded from the given file or iterable.
     """
-    with profile(
-        activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
-        **profile_kwargs,
-    ) as prof:
-        fn(**fn_kwargs)
-    print(prof.key_averages().table(sort_by=sort_by, row_limit=row_limit))
+
+    if isinstance(array, PathLikeType):
+        return _load_array_from_file(array)
+    return _load_array_from_iterable(array)
 
 
-def create_random_topographic_hh_connectivity(
+def _load_tensor_from_file(
+    path: PathLikeType,
+) -> torch.Tensor:
+    """Load a torch tensor from a file.
+
+    Supported file extensions:
+    - npy
+    - csv
+    - pt
+    """
+
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"File {path} does not exist.")
+
+    if os.path.splitext(path)[1] in [".npy", ".npz"]:
+        return torch.tensor(np.load(path))
+    elif os.path.splitext(path)[1] == ".csv":
+        return torch.tensor(_load_df_correct_index(path).to_numpy())
+    elif os.path.splitext(path)[1] == ".pt":
+        return torch.load(path, weights_only=True)
+    else:
+        raise ValueError(
+            f"file {path} has an unsupported extension. "
+            "Supported extensions: .npy, .csv, .pt"
+        )
+
+
+def _load_tensor_from_iterable(
+    iterable: Union[np.ndarray, torch.Tensor, pd.DataFrame, Iterable[Any]],
+) -> torch.Tensor:
+    """Load a torch tensor from an iterable.
+
+    Supported iterable types:
+    - torch.Tensor
+    - np.ndarray
+    - pd.DataFrame
+    - Iterable[Any]
+    """
+    if isinstance(iterable, torch.Tensor):
+        return iterable
+    elif isinstance(iterable, np.ndarray):
+        return torch.tensor(iterable)
+    elif isinstance(iterable, pd.DataFrame):
+        return torch.tensor(iterable.to_numpy())
+    else:
+        return torch.tensor(iterable)
+
+
+def load_tensor(
+    tensor: Union[
+        torch.Tensor, pd.DataFrame, np.ndarray, Iterable[Any], PathLikeType
+    ],
+) -> torch.Tensor:
+    """Load a torch tensor from an array, iterable, or file."""
+
+    if isinstance(tensor, PathLikeType):
+        return _load_tensor_from_file(tensor)
+    return _load_tensor_from_iterable(tensor)
+
+
+def load_sparse_tensor(
+    x: Union[
+        torch.Tensor, pd.DataFrame, np.ndarray, Iterable[Any], PathLikeType
+    ],
+) -> torch.Tensor:
+    """Load a torch tensor from an array, iterable, or file."""
+
+    if isinstance(x, PathLikeType):
+        x = _load_tensor_from_file(x)
+    else:
+        x = _load_tensor_from_iterable(x)
+
+    x = x.to_sparse()
+
+    if x._nnz() > SPARSE_TENSOR_WARNING_THRESHOLD * x.numel():
+        warnings.warn(
+            f"loaded a sparse tensor with more than "
+            f"{SPARSE_TENSOR_WARNING_THRESHOLD:.0%}% non-zero elements. "
+            "This is likely undesirable. Ensure your input is sufficiently "
+            "sparse (whether explicitly or implicitly) to leverage the "
+            "benefits of sparse tensors."
+        )
+
+    return x
+
+
+########################################################
+# Connectome creation
+########################################################
+
+
+def create_sparse_topographic_connectome(
     sheet_size: tuple[int, int],
     synapse_std: float,
     synapses_per_neuron: int,
@@ -322,60 +439,19 @@ def create_random_topographic_hh_connectivity(
     return connectivity_hh
 
 
-def create_identity_ih_connectivity(
-    input_size: int,
+def create_neuron_typed_connectome(
     num_neurons: int,
-    input_indices: Optional[Union[torch.Tensor, PathLike]] = None,
-) -> torch.Tensor:
-    """Create identity connectivity for input-to-hidden connections.
-
-    Args:
-        input_size (int): Size of the input.
-        num_neurons (int): Number of neurons in the hidden layer.
-        input_indices (Union[torch.Tensor, PathLike], optional): Indices of
-            neurons that receive input. If None, all neurons receive input from
-            corresponding input indices. Defaults to None.
-
-    Returns:
-        torch.Tensor: Sparse connectivity matrix in COO format.
-
-    Raises:
-        ValueError: If input_indices are invalid.
-    """
-    # Generate identity connectivity for input-to-hidden connections
-    indices_ih = torch.stack(
-        (
-            input_indices
-            if input_indices is not None
-            else torch.arange(input_size),
-            torch.arange(input_size),
-        )  # type: ignore
-    )
-
-    values_ih = torch.ones(indices_ih.shape[1])
-
-    connectivity_ih = torch.sparse_coo_tensor(
-        indices_ih,
-        values_ih,
-        (num_neurons, input_size),
-        check_invariants=True,
-    ).coalesce()
-
-    return connectivity_ih
-
-def initialize_connectome(
-    num_neurons: int,
-    cell_type_probs: np.ndarray,
-    celltype_connectivity: np.ndarray,
+    neuron_type_probs: np.ndarray,
+    neuron_type_connectivity: np.ndarray,
     deterministic_type_assignment: bool = False,
 ) -> tuple[torch.Tensor, np.ndarray]:
     """Initialize a synthetic connectome as a sparse adjacency matrix.
 
     Args:
         num_neurons (int): Total number of neurons.
-        cell_type_probs (np.ndarray): Proportion of each cell type, summing to 1.
-        celltype_connectivity (np.ndarray): Cell-type to cell-type connectivity probabilities.
-        deterministic_type_assignment (bool, optional): If True, assigns neurons deterministically based on cell_type_probs
+        neuron_type_probs (np.ndarray): Proportion of each neuron type, summing to 1.
+        neuron_type_connectivity (np.ndarray): neuron-type to neuron-type connectivity probabilities.
+        deterministic_type_assignment (bool, optional): If True, assigns neurons deterministically based on neuron_type_probs
             interpreted as exact counts rather than probabilities. Defaults to False.
 
     Returns:
@@ -383,12 +459,12 @@ def initialize_connectome(
             and the assigned neuron types.
     """
 
-    # Determine number of cell types
-    num_cell_types = len(cell_type_probs)
+    # Determine number of neuron types
+    num_neuron_types = len(neuron_type_probs)
 
-    # Assign cell types to neurons
+    # Assign neuron types to neurons
     if deterministic_type_assignment:
-        neuron_counts = (np.array(cell_type_probs) * num_neurons).astype(int)
+        neuron_counts = (np.array(neuron_type_probs) * num_neurons).astype(int)
         neuron_types = np.concatenate(
             [
                 np.full(count, i, dtype=int)
@@ -398,7 +474,7 @@ def initialize_connectome(
         np.random.shuffle(neuron_types)  # Shuffle to avoid ordering bias
     else:
         neuron_types = np.random.choice(
-            num_cell_types, size=num_neurons, p=cell_type_probs
+            num_neuron_types, size=num_neurons, p=neuron_type_probs
         )
 
     # Generate all possible neuron-neuron pairs
@@ -408,12 +484,12 @@ def initialize_connectome(
     row_indices = row_indices.flatten()
     col_indices = col_indices.flatten()
 
-    # Get corresponding cell-type pairs
+    # Get corresponding neuron-type pairs
     src_types = neuron_types[row_indices]
     tgt_types = neuron_types[col_indices]
 
     # Get connection probabilities from the connectivity matrix
-    probs = celltype_connectivity[src_types, tgt_types]
+    probs = neuron_type_connectivity[src_types, tgt_types]
 
     # Sample connections
     mask = np.random.rand(len(probs)) < probs
@@ -430,4 +506,111 @@ def initialize_connectome(
         (num_neurons, num_neurons),
         check_invariants=True,
     ).coalesce()
+
     return sparse_adj, neuron_types
+
+
+def create_sparse_projection(
+    size: int,
+    num_neurons: int,
+    indices: Optional[Union[torch.Tensor, PathLikeType]] = None,
+    mode: Literal["ih", "ho"] = "ih",
+) -> torch.Tensor:
+    """Create identity connectivity for input-to-hidden or hidden-to-output
+    connections.
+
+    Args:
+        size (int): Size of the input or output.
+        num_neurons (int): Number of neurons in the hidden layer.
+        indices (Union[torch.Tensor, PathLike], optional): Indices of
+            neurons that receive input. If None, all neurons receive input from
+            corresponding input indices. Defaults to None.
+        mode (Literal["ih", "ho"], optional): Whether to create input-to-hidden
+            or hidden-to-output connectivity (only changes the orientation of
+            the connectivity matrix). Defaults to "ih".
+
+    Returns:
+        torch.Tensor: Sparse connectivity matrix in COO format.
+
+    Raises:
+        ValueError: If input_indices are invalid.
+    """
+
+    # Generate identity connectivity for input-to-hidden connections
+    if indices is None:
+        indices = torch.arange(size)
+
+    if mode == "ih":
+        indices = torch.stack((indices, torch.arange(size)))  # type: ignore
+        shape = (num_neurons, size)
+    else:
+        indices = torch.stack((torch.arange(size), indices))  # type: ignore
+        shape = (size, num_neurons)
+
+    values = torch.ones(indices.shape[1])
+
+    connectivity = torch.sparse_coo_tensor(
+        indices,
+        values,
+        shape,
+        check_invariants=True,
+    ).coalesce()
+
+    return connectivity
+
+
+########################################################
+# Profiling
+########################################################
+
+
+def print_cuda_mem_stats(device: Optional[torch.device] = None):
+    """Print CUDA memory statistics for debugging."""
+    f, t = torch.cuda.mem_get_info(device)
+    print(f"Free/Total: {f / (1024**3):.2f}GB/{t / (1024**3):.2f}GB")
+
+
+def count_parameters(model):
+    """Count the number of trainable parameters in a model.
+
+    Args:
+        model: PyTorch model.
+
+    Returns:
+        int: Number of trainable parameters.
+    """
+    total_params = 0
+    for param in model.parameters():
+        num_params = (
+            param._nnz()
+            if param.layout
+            in (torch.sparse_coo, torch.sparse_csr, torch.sparse_csc)
+            else param.numel()
+        )
+        total_params += num_params
+    return total_params
+
+
+def profile_fn(
+    fn,
+    sort_by="cuda_time_total",
+    row_limit=50,
+    profile_kwargs={},
+    fn_kwargs={},
+):
+    """Profile a function with PyTorch's profiler.
+
+    Args:
+        fn: Function to profile.
+        sort_by (str, optional): Column to sort results by. Defaults to
+            "cuda_time_total".
+        row_limit (int, optional): Maximum number of rows to display.
+            Defaults to 50.
+        **fn_kwargs: Keyword arguments to pass to the function.
+    """
+    with profile(
+        activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+        **profile_kwargs,
+    ) as prof:
+        fn(**fn_kwargs)
+    print(prof.key_averages().table(sort_by=sort_by, row_limit=row_limit))
