@@ -21,6 +21,7 @@ nav:
     - Connectome-constrained models: reference/connectome.md
     - Sparse utilities: reference/sparse.md
     - Misc utilities: reference/misc.md
+  - Contributing: contributing.md
 
 theme:
   name: material

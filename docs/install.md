@@ -65,17 +65,19 @@ For example, below are the installation commands for PyTorch 2.5.1 and
 Torchvision 0.20.1 on the following systems:
 
 - System with a CUDA 12.4-compatible GPU
-```bash
-pip install torch==2.5.1 torchvision==0.20.1 --index-url https://download.pytorch.org/whl/cu124
-```
+  ```bash
+  pip install torch==2.5.1 torchvision==0.20.1 --index-url https://download.pytorch.org/whl/cu124
+  ```
+
 - CPU-only system (not macOS)
-```bash
-pip install torch==2.5.1 torchvision==0.20.1 --index-url https://download.pytorch.org/whl/cpu
-```
+  ```bash
+  pip install torch==2.5.1 torchvision==0.20.1 --index-url https://download.pytorch.org/whl/cpu
+  ```
+
 - CPU-only system (macOS)
-```bash
-pip install torch==2.5.1 torchvision==0.20.1
-```
+  ```bash
+  pip install torch==2.5.1 torchvision==0.20.1
+  ```
 
 ### PyTorch Sparse
 You must install PyTorch ([see above](#pytorch-and-torchvision)) before installing PyTorch Sparse.
@@ -107,25 +109,24 @@ pip install bioplnn
 
 ### From source
 
-1. Clone the BioPlNN repository:
+- Clone the BioPlNN repository:
 
 ```bash
 git clone https://github.com/FieteLab/torch-bioplnn-dev.git
 ```
 
-2. Navigate to the cloned directory:
+- Navigate to the cloned directory:
 
 ```bash
 cd bioplnn
 ```
 
-3. Install the package:
+- Install the package:
 
 ```bash
 pip install -e .
 ```
 where `-e` installs the package in editable mode.
-
 
 ## Usage
 

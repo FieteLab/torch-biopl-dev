@@ -19,7 +19,7 @@
     - Includes under-the-hood application of sparse tensor arithmetic for efficient memory usage, enabling simulation and training of large-scale networks.
     - Supports the ability to flexibly spin up probabilistic connectomes, define celltypes and associated synaptic variables, and tune user-defined parameters via gradient descent.
 
-* `SpatiallyEmbeddedRNN`: A library of functions that support
+* `SpatiallyEmbeddedRNN`:
     - Model constructors and helpers to wire up cortical architectures with varying levels of biological specification.
     - Configurable aspects include cell classes, cell types, cell subtypes, local connectivity rules, synaptic and neuronal nonlinearities, time constants, feedback wiring, and lots more.
 
@@ -32,4 +32,4 @@ For [basic](https://fietelab.github.io/torch-biopl-dev/examples/basic_spatial_ex
 
 ### Contributing
 
-We welcome contributions to `torch-biopl`. For guidelines on submitting code and documentation changes, please refer to [contributing](#).
+We welcome contributions to `torch-biopl`. For guidelines on submitting code and documentation changes, please refer to [contributing](https://fietelab.github.io/torch-biopl-dev/contributing).
