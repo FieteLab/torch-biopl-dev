@@ -439,7 +439,7 @@ def create_sparse_topographic_connectome(
     return connectivity_hh
 
 
-def create_neuron_type_connectome(
+def create_neuron_typed_connectome(
     num_neurons: int,
     neuron_type_probs: np.ndarray,
     neuron_type_connectivity: np.ndarray,
