@@ -1,7 +1,7 @@
-# Contributing to BioPlNN
+# Contributing to `torch-biopl`
 
-Thank you for investing your time in contributing to BioPlNN! Your
-contributions are essential in making BioPlNN a robust and innovative project.
+Thank you for investing your time in contributing to `torch-biopl`. Your
+contributions are essential in making this a robust and innovative project.
 
 In this guide you will get an overview of the contribution workflow from
 opening an issue, creating a PR, reviewing, and merging the PR.
@@ -10,7 +10,7 @@ Please take a moment to review our guidelines below.
 
 ## New Contributor Guide
 
-To get an overview of the project, read the [README](/README.md) file.
+To get an overview of the project, please checkout the [project webpage](index.md).
 
 If you are new to open source contributions, here are some resources to help you get started:
 - [Forking a Repository](https://docs.github.com/en/get-started/quickstart/fork-a-repo)
@@ -19,7 +19,7 @@ If you are new to open source contributions, here are some resources to help you
 
 ## Getting Started
 
-To begin contributing to BioPlNN, you must first set up your development
+To begin contributing to `torch-biopl`, you must first set up your development
 environment and install the package from source. To do so, follow these steps:
 
 1. Create a fork of the repository.
@@ -37,9 +37,8 @@ environment and install the package from source. To do so, follow these steps:
    ```
 
 4. Setup your development environment and install the package and its dependencies
-   according to the [installation guide](/docs/installation.md).
-
-   *Note*: When installing the package, we recommend that you use editable mode (using `-e`) and
+   according to the [installation guide](install.md).
+   ***Note***: When installing the package, we recommend that you use editable mode (using `-e`) and
    install the `dev` extras, which includes several useful tools for development,
    including the **required** pre-commit hooks:
    ```bash
@@ -75,7 +74,7 @@ tested by the existing tests, please add tests for your changes. We appreciate
 thorough testing!
 
 To test your changes, run `pytest` in your development environment (you will
-have to have installed the `dev` extras (see [Getting Started](#getting-started)):
+have to have installed the `dev` extras:
 ```bash
 pytest
 ```

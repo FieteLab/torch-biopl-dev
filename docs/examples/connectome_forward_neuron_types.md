@@ -4,14 +4,15 @@ In this tutorial, we extend on the previous example, but now explicitly specify 
 
 
 ```python
-import torch
 import os
+
+import matplotlib.pyplot as plt
+import numpy as np
+import torch
 import torchvision.transforms as T
 from torch.utils.data import DataLoader
 from torchvision.datasets import MNIST
 from tqdm import tqdm
-import numpy as np
-import matplotlib.pyplot as plt
 
 from bioplnn.models import ConnectomeODERNN
 ```
@@ -50,17 +51,17 @@ ex_indices_neuron_type2 = torch.load(save_path_index_2, weights_only=True)
 
     Downloading...
     From (original): https://drive.google.com/uc?id=18448HYpYrm60boziHG73bxN4CK5jG-1g
-    From (redirected): https://drive.google.com/uc?id=18448HYpYrm60boziHG73bxN4CK5jG-1g&confirm=t&uuid=27f9b878-4dc9-4201-8ae8-83319e4db65d
-    To: /net/vast-storage/scratch/vast/mcdermott/lakshmin/hackathon-test/bioplnn/examples/connectivity/turaga/turaga-dros-visual-connectome.pt
-    100%|████████████████████████████████████████| 111M/111M [00:01<00:00, 89.2MB/s]
+    From (redirected): https://drive.google.com/uc?id=18448HYpYrm60boziHG73bxN4CK5jG-1g&confirm=t&uuid=f90d6fad-3203-4337-ac28-5a98d3140b75
+    To: /net/vast-storage/scratch/vast/mcdermott/lakshmin/torch-bioplnn-dev/examples/connectivity/turaga/turaga-dros-visual-connectome.pt
+    100%|████████████████████████████████████████| 111M/111M [00:01<00:00, 72.6MB/s]
     Downloading...
     From: https://drive.google.com/uc?id=19ePGRpMznn2l1Mp8Gu0rTk-PP-EDlyEC
-    To: /net/vast-storage/scratch/vast/mcdermott/lakshmin/hackathon-test/bioplnn/examples/connectivity/turaga/example_indices_ntype1.pt
-    100%|████████████████████████████████████████| 381k/381k [00:00<00:00, 17.9MB/s]
+    To: /net/vast-storage/scratch/vast/mcdermott/lakshmin/torch-bioplnn-dev/examples/connectivity/turaga/example_indices_ntype1.pt
+    100%|████████████████████████████████████████| 381k/381k [00:00<00:00, 10.3MB/s]
     Downloading...
     From: https://drive.google.com/uc?id=1eb0H-WTQWg1DzFZ201-ihIFqgZ8u3N0Y
-    To: /net/vast-storage/scratch/vast/mcdermott/lakshmin/hackathon-test/bioplnn/examples/connectivity/turaga/example_indices_ntype2.pt
-    100%|████████████████████████████████████████| 381k/381k [00:00<00:00, 12.6MB/s]
+    To: /net/vast-storage/scratch/vast/mcdermott/lakshmin/torch-bioplnn-dev/examples/connectivity/turaga/example_indices_ntype2.pt
+    100%|████████████████████████████████████████| 381k/381k [00:00<00:00, 7.53MB/s]
 
 
 
@@ -85,7 +86,6 @@ ax.set_ylabel("Presynaptic", fontsize=18)
 ax.set_xticks([0, spatial_extent - 1])
 ax.set_yticks([0, spatial_extent - 1])
 plt.show()
-
 ```
 
     Connectome dimensions: 47521x47521
@@ -93,9 +93,7 @@ plt.show()
 
 
 
-
 ![png](connectome_forward_neuron_types_files/connectome_forward_neuron_types_6_1.png)
-
 
 
 ## Creating input and output projection matrices
@@ -104,16 +102,17 @@ In a world where each neuron receives external input, you can also initialize th
 
 
 ```python
-from bioplnn.utils.torch import create_identity_ih_connectivity
+from bioplnn.utils.torch import create_sparse_projection
 
 # since we are feeding in MNIST images
 input_size = 28 * 28
 num_neurons = connectome.shape[0]
 
-input_projection_matrix = create_identity_ih_connectivity(
-    input_size=input_size,
+input_projection_matrix = create_sparse_projection(
+    size=input_size,
     num_neurons=num_neurons,
-    input_indices=torch.randint(high=num_neurons, size=(input_size,)),
+    indices=torch.randint(high=num_neurons, size=(input_size,)),
+    mode="ih",
 )
 
 # for now, lets just read outputs from all neurons
@@ -122,28 +121,49 @@ output_projection_matrix = None
 
 ## Setting up the connectome-constrained model
 
+For each neuron in the connectome, we can assign a `cell type`.
+
 
 ```python
+all_indices = torch.rand(num_neurons)
+neuron_type_str = np.empty(num_neurons, dtype=object)
+neuron_type_str[all_indices < 0.5] = "neuron_type_A"
+neuron_type_str[all_indices >= 0.5] = "neuron_type_B"
+neuron_type_str = neuron_type_str.astype(np.str_)
+
+# Integer array
+neuron_type_int = np.zeros(num_neurons, dtype=int)
+neuron_type_int[neuron_type_str == "neuron_type_A"] = 0
+neuron_type_int[neuron_type_str == "neuron_type_B"] = 1
+
+# Tensor
+neuron_type_tensor = torch.tensor(neuron_type_int)
+```
+
+***Important*** -- In this example, we will specify attributes per cell type, and hence will set the variable `attr_input_specification`="per_neuron_type". If instead, you want to specify attributes for each individual neuron in the connectome then you set `attr_input_specification`="per_neuron".
+
+
+```python
+attr_input_specification = "per_neuron_type"
+
 connectome_rnn_kwargs = {
     "input_size": input_size,
-    "hidden_size": num_neurons,
-    "connectivity_hh": connectome,
-    "connectivity_ih": input_projection_matrix,
-    "output_neurons": output_projection_matrix,
+    "num_neurons": num_neurons,
+    "connectome": connectome,
+    "input_projection": input_projection_matrix,
+    "output_projection": output_projection_matrix,
+    # this is new! you can cell-type neurons in the connectome
     "num_neuron_types": 2,
-
-    # this is new!
-    "neuron_type_class": ["excitatory", "inhibitory"],
-    "neuron_type_indices": [
-        ex_indices_neuron_type1,
-        ex_indices_neuron_type2,
-    ],
-
+    "neuron_class_mode": attr_input_specification,
+    # this is either of length num_neuron_types OR num_neurons
+    "neuron_class": ["excitatory", "inhibitory"],
+    # assign the class identity of each neuron in the connectome
+    "neuron_type": neuron_type_tensor,
     # note how the nonlinearity is global -- it can be per-celltype if needed
     # also note how the taus are initialized per neuron type.
-    "neuron_type_nonlinearity": "Sigmoid",
-    "neuron_type_tau_init": [1.25, 2.0],
-
+    "neuron_nonlinearity": "Sigmoid",
+    "neuron_tau_init": [1.25, 2.0],
+    "neuron_tau_mode": attr_input_specification,
     # flag to determine if these are tunable via gradients. same holds true for synaptic gains.
     "train_tau": True,
     "batch_first": False,
@@ -161,6 +181,7 @@ print(model)
       (nonlinearity): Sigmoid()
       (hh): SparseLinear()
       (ih): SparseLinear()
+      (ho): Identity()
       (solver): OptimizedModule(
         (_orig_mod): AutoDiffAdjoint(step_method=Dopri5(
           (term): ODETerm()
@@ -169,12 +190,10 @@ print(model)
         ), max_steps=None, backprop_through_step_size_control=True)
       )
       (neuron_type_indices): ParameterList(
-          (0): Parameter containing: [torch.int64 of size 23760 (cuda:0)]
-          (1): Parameter containing: [torch.int64 of size 23761 (cuda:0)]
+          (0): Parameter containing: [torch.int64 of size 23691 (cuda:0)]
+          (1): Parameter containing: [torch.int64 of size 23830 (cuda:0)]
       )
-      (neuron_type_nonlinearity): ModuleList(
-        (0-1): 2 x Sigmoid()
-      )
+      (neuron_nonlinearity): Sigmoid()
     )
 
 
@@ -206,16 +225,12 @@ print(f"x flattened shape: {x.shape}")
 ```python
 model.eval()
 _, neural_activities, timesteps = model(
-    x, start_time=0, end_time=1.0, num_steps=20
+    x, start_time=0, end_time=1.0, num_evals=20
 )
 print(f"Neural activity shape: {neural_activities.shape}")
 ```
 
     Neural activity shape: torch.Size([20, 8, 47521])
-
-
-    /scratch2/weka/mcdermott/lakshmin/conda_envs/test_bioplnn_env/lib/python3.12/site-packages/torch/_inductor/cudagraph_trees.py:2345: UserWarning: Unable to hit fast path of CUDAGraphs because of pending, uninvoked backwards. Consider running with torch.no_grad() or using torch.compiler.cudagraph_mark_step_begin() before each model invocation
-      warnings.warn(
 
 
 
@@ -243,5 +258,4 @@ ax.set_ylabel("Activity", fontsize=18)
 
 
 
-
-![png](connectome_forward_neuron_types_files/connectome_forward_neuron_types_14_1.png)
+![png](connectome_forward_neuron_types_files/connectome_forward_neuron_types_17_1.png)

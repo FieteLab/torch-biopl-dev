@@ -12,20 +12,25 @@ nav:
           - Basic example: examples/basic_spatial_example.md
           - Advanced configurability: examples/advance_configs.md
       - Connectome-constrained models:
+          - Basic utilities: examples/connectome_utilities.md
           - Running forward dynamics: examples/connectome_forward.md
           - Running reverse dynamics: examples/connectome_backward.md
-          - Cell typing connectomes: examples/connectome_forward_neuron_types.md
+          - Handling cell types: examples/connectome_forward_neuron_types.md
   - API Reference:
-      - Spatially embedded networks: reference/eirnn.md
-      - Connectome-constrained models: reference/connectome.md
-      - Sparse utilities: reference/sparse.md
-      - Misc utilities: reference/misc.md
+    - reference/index.md
+    - Spatially embedded networks: reference/eirnn.md
+    - Connectome-constrained models: reference/connectome.md
+    - Sparse utilities: reference/sparse.md
+    - Misc utilities: reference/misc.md
+  - Contributing: contributing.md
 
 theme:
   name: material
   features:
     - content.code.copy
+    - navigation.path
     - navigation.expand
+    - navigation.indexes
   font:
     text: Roboto
     code: Red Hat Mono
