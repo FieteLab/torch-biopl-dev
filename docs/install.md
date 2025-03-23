@@ -104,7 +104,7 @@ Then, you can install the package using one of the following methods:
 ### From PyPI (recommended) (not yet available)
 
 ```bash
-pip install bioplnn
+pip install torch-biopl
 ```
 
 ### From source
@@ -127,6 +127,13 @@ cd bioplnn
 pip install -e .
 ```
 where `-e` installs the package in editable mode.
+
+- [Recommended] Additional dependencies
+
+  In order to run the examples and tutorials provided, we recommend that you install the `dev` extras.
+  ```bash
+  pip install -e ".[dev]"
+  ```
 
 ## Usage
 

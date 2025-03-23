@@ -13,6 +13,7 @@ Note: For demonstration purposes, we'll use flattened MNIST images as inputs int
 
 ```python
 import os
+
 import torch
 import torchvision.transforms as T
 from torch import nn
@@ -27,7 +28,7 @@ from bioplnn.models import ConnectomeODEClassifier
 ```python
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 torch.set_float32_matmul_precision("high")
-print('Using device: {}'.format(device))
+print("Using device: {}".format(device))
 ```
 
     Using device: cuda
@@ -36,19 +37,26 @@ print('Using device: {}'.format(device))
 
 ```python
 # Download the connectome and read it in as a torch tensor. We have pre-processed this as a sparse tensor for the purposes of this example.
-!gdown "https://drive.google.com/uc?id=18448HYpYrm60boziHG73bxN4CK5jG-1g"
-connectome = torch.load('turaga-dros-visual-connectome.pt', weights_only=True)
+save_dir = "connectivity/turaga"
+os.makedirs(save_dir, exist_ok=True)
+!gdown "https://drive.google.com/uc?id=18448HYpYrm60boziHG73bxN4CK5jG-1g" -O "{save_dir}/turaga-dros-visual-connectome.pt"
+connectome = torch.load(
+    os.path.join(save_dir, "turaga-dros-visual-connectome.pt"),
+    weights_only=True,
+)
 
-from bioplnn.utils.torch import create_identity_ih_connectivity
+from bioplnn.utils import create_sparse_projection
+
 # since we are feeding in MNIST images
 input_size = 28 * 28
 num_neurons = connectome.shape[0]
 
-input_projection_matrix = create_identity_ih_connectivity(
-                                input_size=input_size,
-                                num_neurons=num_neurons,
-                                input_indices=torch.randint(high=num_neurons, size=(input_size,))
-                            )
+input_projection_matrix = create_sparse_projection(
+    size=input_size,
+    num_neurons=num_neurons,
+    indices=torch.randint(high=num_neurons, size=(input_size,)),
+    mode="ih",
+)
 
 # for now, lets just read outputs from all neurons
 output_projection_matrix = None
@@ -56,9 +64,9 @@ output_projection_matrix = None
 
     Downloading...
     From (original): https://drive.google.com/uc?id=18448HYpYrm60boziHG73bxN4CK5jG-1g
-    From (redirected): https://drive.google.com/uc?id=18448HYpYrm60boziHG73bxN4CK5jG-1g&confirm=t&uuid=1c1721af-76e8-4f9c-9e5f-bf15e9e4c66f
-    To: /net/vast-storage/scratch/vast/mcdermott/lakshmin/hackathon-test/bioplnn/examples/turaga-dros-visual-connectome.pt
-    100%|█████████████████████████████████████████| 111M/111M [00:01<00:00, 108MB/s]
+    From (redirected): https://drive.google.com/uc?id=18448HYpYrm60boziHG73bxN4CK5jG-1g&confirm=t&uuid=d8cf0a1e-b8ee-4271-b52e-09e3885e30a2
+    To: /net/vast-storage/scratch/vast/mcdermott/lakshmin/torch-bioplnn-dev/examples/connectivity/turaga/turaga-dros-visual-connectome.pt
+    100%|█████████████████████████████████████████| 111M/111M [00:01<00:00, 111MB/s]
 
 
 ## Setting up the classifier wrapper
@@ -70,11 +78,11 @@ Here, we have written a simple utility that adds an output projecting layer from
 model = ConnectomeODEClassifier(
     rnn_kwargs={
         "input_size": input_size,
-        "hidden_size": num_neurons,
-        "connectivity_hh": torch.abs(connectome),
-        "connectivity_ih": input_projection_matrix,
-        "output_neurons": output_projection_matrix,
-        "nonlinearity": "Sigmoid",
+        "num_neurons": num_neurons,
+        "connectome": torch.abs(connectome),
+        "input_projection": input_projection_matrix,
+        "output_projection": output_projection_matrix,
+        "neuron_nonlinearity": "Sigmoid",
         "batch_first": False,
         "compile_solver_kwargs": {
             "mode": "max-autotune",
@@ -82,9 +90,9 @@ model = ConnectomeODEClassifier(
             "fullgraph": True,
         },
     },
-    num_classes = 10,
-    fc_dim = 256,
-    dropout = 0.5,
+    num_classes=10,
+    fc_dim=256,
+    dropout=0.5,
 ).to(device)
 print(model)
 
@@ -100,6 +108,7 @@ criterion = nn.CrossEntropyLoss()
         (nonlinearity): Sigmoid()
         (hh): SparseLinear()
         (ih): SparseLinear()
+        (ho): Identity()
         (solver): OptimizedModule(
           (_orig_mod): AutoDiffAdjoint(step_method=Dopri5(
             (term): ODETerm()
@@ -107,6 +116,7 @@ criterion = nn.CrossEntropyLoss()
             (term): ODETerm()
           ), max_steps=None, backprop_through_step_size_control=True)
         )
+        (neuron_nonlinearity): Sigmoid()
       )
       (out_layer): Sequential(
         (0): Flatten(start_dim=1, end_dim=-1)
@@ -124,7 +134,7 @@ criterion = nn.CrossEntropyLoss()
 transform = T.Compose([T.ToTensor(), T.Normalize((0.1307,), (0.3081,))])
 train_data = MNIST(root="data", train=True, transform=transform, download=True)
 train_loader = DataLoader(
-    train_data, batch_size=128, num_workers=0, shuffle=True
+    train_data, batch_size=8, num_workers=0, shuffle=True
 )
 ```
 
@@ -150,7 +160,7 @@ for epoch in range(n_epochs):
         x = x.to(device)
         labels = labels.to(device)
         torch._inductor.cudagraph_mark_step_begin()
-        logits = model(x, num_steps=2)
+        logits = model(x, num_evals=2)
         loss = criterion(logits, labels)
         optimizer.zero_grad()
         loss.backward()
@@ -163,21 +173,162 @@ for epoch in range(n_epochs):
         running_loss += loss.item()
 
         running_acc = running_correct / running_total
-        if (i + 1)%log_frequency == 0:
+        if (i + 1) % log_frequency == 0:
             print(
-                f"Training | Epoch: {epoch} | " +
-                f"Loss: {running_loss:.4f} | " +
-                f"Acc: {running_acc:.2%}"
+                f"Training | Epoch: {epoch} | "
+                + f"Loss: {running_loss:.4f} | "
+                + f"Acc: {running_acc:.2%}"
             )
             running_loss, running_correct, running_total = 0, 0, 0
 ```
 
-    Training | Epoch: 0 | Loss: 180.6905 | Acc: 10.23%
-    Training | Epoch: 0 | Loss: 115.1636 | Acc: 9.80%
-    Training | Epoch: 0 | Loss: 115.1504 | Acc: 9.77%
-    Training | Epoch: 0 | Loss: 115.1351 | Acc: 9.72%
-    Training | Epoch: 0 | Loss: 115.1452 | Acc: 9.11%
-    Training | Epoch: 0 | Loss: 115.0842 | Acc: 10.80%
-    Training | Epoch: 0 | Loss: 115.1163 | Acc: 11.39%
-    Training | Epoch: 0 | Loss: 115.0861 | Acc: 10.94%
-    Training | Epoch: 0 | Loss: 115.0515 | Acc: 11.91%
+    Training | Epoch: 0 | Loss: 533.8668 | Acc: 11.25%
+    Training | Epoch: 0 | Loss: 115.2019 | Acc: 9.50%
+    Training | Epoch: 0 | Loss: 115.0685 | Acc: 8.00%
+    Training | Epoch: 0 | Loss: 115.0090 | Acc: 11.75%
+    Training | Epoch: 0 | Loss: 115.2327 | Acc: 8.75%
+    Training | Epoch: 0 | Loss: 115.1742 | Acc: 13.50%
+    Training | Epoch: 0 | Loss: 115.1926 | Acc: 10.00%
+    Training | Epoch: 0 | Loss: 115.1818 | Acc: 10.25%
+    Training | Epoch: 0 | Loss: 115.1044 | Acc: 11.25%
+    Training | Epoch: 0 | Loss: 115.0677 | Acc: 10.75%
+    Training | Epoch: 0 | Loss: 115.1434 | Acc: 12.00%
+    Training | Epoch: 0 | Loss: 115.0964 | Acc: 12.50%
+    Training | Epoch: 0 | Loss: 115.0139 | Acc: 12.75%
+    Training | Epoch: 0 | Loss: 115.0094 | Acc: 13.50%
+    Training | Epoch: 0 | Loss: 115.0079 | Acc: 11.75%
+    Training | Epoch: 0 | Loss: 114.9612 | Acc: 12.50%
+    Training | Epoch: 0 | Loss: 115.1430 | Acc: 10.50%
+    Training | Epoch: 0 | Loss: 115.0567 | Acc: 12.00%
+    Training | Epoch: 0 | Loss: 115.0514 | Acc: 12.75%
+    Training | Epoch: 0 | Loss: 114.9140 | Acc: 14.00%
+    Training | Epoch: 0 | Loss: 115.0926 | Acc: 11.00%
+    Training | Epoch: 0 | Loss: 115.0142 | Acc: 10.75%
+    Training | Epoch: 0 | Loss: 115.2382 | Acc: 10.50%
+    Training | Epoch: 0 | Loss: 115.1861 | Acc: 9.75%
+    Training | Epoch: 0 | Loss: 115.0188 | Acc: 11.25%
+    Training | Epoch: 0 | Loss: 115.1348 | Acc: 10.75%
+    Training | Epoch: 0 | Loss: 114.8985 | Acc: 13.00%
+    Training | Epoch: 0 | Loss: 115.0376 | Acc: 11.50%
+    Training | Epoch: 0 | Loss: 114.9054 | Acc: 13.50%
+    Training | Epoch: 0 | Loss: 115.0908 | Acc: 11.00%
+    Training | Epoch: 0 | Loss: 115.0573 | Acc: 12.75%
+    Training | Epoch: 0 | Loss: 115.0027 | Acc: 12.00%
+    Training | Epoch: 0 | Loss: 115.0626 | Acc: 9.75%
+    Training | Epoch: 0 | Loss: 115.1542 | Acc: 10.75%
+    Training | Epoch: 0 | Loss: 115.0336 | Acc: 13.25%
+    Training | Epoch: 0 | Loss: 115.2255 | Acc: 8.25%
+    Training | Epoch: 0 | Loss: 114.9530 | Acc: 12.25%
+    Training | Epoch: 0 | Loss: 115.2533 | Acc: 8.50%
+    Training | Epoch: 0 | Loss: 115.2574 | Acc: 9.50%
+    Training | Epoch: 0 | Loss: 114.9386 | Acc: 13.25%
+    Training | Epoch: 0 | Loss: 115.0560 | Acc: 10.00%
+    Training | Epoch: 0 | Loss: 115.0315 | Acc: 10.50%
+    Training | Epoch: 0 | Loss: 115.2135 | Acc: 10.00%
+    Training | Epoch: 0 | Loss: 115.0068 | Acc: 14.25%
+    Training | Epoch: 0 | Loss: 114.9713 | Acc: 13.25%
+    Training | Epoch: 0 | Loss: 115.0257 | Acc: 11.50%
+    Training | Epoch: 0 | Loss: 115.0284 | Acc: 12.00%
+    Training | Epoch: 0 | Loss: 114.9427 | Acc: 11.25%
+    Training | Epoch: 0 | Loss: 115.1230 | Acc: 9.75%
+    Training | Epoch: 0 | Loss: 115.1148 | Acc: 11.75%
+    Training | Epoch: 0 | Loss: 115.1142 | Acc: 10.50%
+    Training | Epoch: 0 | Loss: 114.9336 | Acc: 12.25%
+    Training | Epoch: 0 | Loss: 115.0960 | Acc: 11.25%
+    Training | Epoch: 0 | Loss: 115.0744 | Acc: 11.00%
+    Training | Epoch: 0 | Loss: 115.0859 | Acc: 9.75%
+    Training | Epoch: 0 | Loss: 114.9641 | Acc: 11.50%
+    Training | Epoch: 0 | Loss: 115.1912 | Acc: 10.50%
+    Training | Epoch: 0 | Loss: 115.0681 | Acc: 10.25%
+    Training | Epoch: 0 | Loss: 115.2021 | Acc: 11.25%
+    Training | Epoch: 0 | Loss: 115.1686 | Acc: 10.00%
+    Training | Epoch: 0 | Loss: 115.1215 | Acc: 9.75%
+    Training | Epoch: 0 | Loss: 115.0815 | Acc: 10.25%
+    Training | Epoch: 0 | Loss: 114.8752 | Acc: 14.75%
+    Training | Epoch: 0 | Loss: 115.2911 | Acc: 9.75%
+    Training | Epoch: 0 | Loss: 115.2639 | Acc: 11.25%
+    Training | Epoch: 0 | Loss: 115.1642 | Acc: 10.75%
+    Training | Epoch: 0 | Loss: 115.1821 | Acc: 10.50%
+    Training | Epoch: 0 | Loss: 115.3850 | Acc: 7.75%
+    Training | Epoch: 0 | Loss: 115.2006 | Acc: 8.75%
+    Training | Epoch: 0 | Loss: 114.9202 | Acc: 14.00%
+    Training | Epoch: 0 | Loss: 115.0008 | Acc: 11.50%
+    Training | Epoch: 0 | Loss: 115.1776 | Acc: 10.25%
+    Training | Epoch: 0 | Loss: 115.1527 | Acc: 12.75%
+    Training | Epoch: 0 | Loss: 115.2655 | Acc: 9.00%
+    Training | Epoch: 0 | Loss: 115.0813 | Acc: 11.75%
+    Training | Epoch: 0 | Loss: 115.0945 | Acc: 10.00%
+    Training | Epoch: 0 | Loss: 115.1136 | Acc: 8.50%
+    Training | Epoch: 0 | Loss: 115.2337 | Acc: 10.25%
+    Training | Epoch: 0 | Loss: 115.1391 | Acc: 8.25%
+    Training | Epoch: 0 | Loss: 115.0075 | Acc: 11.75%
+    Training | Epoch: 0 | Loss: 115.0086 | Acc: 12.00%
+    Training | Epoch: 0 | Loss: 115.0590 | Acc: 13.50%
+    Training | Epoch: 0 | Loss: 115.1641 | Acc: 9.50%
+    Training | Epoch: 0 | Loss: 115.0044 | Acc: 13.75%
+    Training | Epoch: 0 | Loss: 115.1192 | Acc: 11.50%
+    Training | Epoch: 0 | Loss: 115.0291 | Acc: 10.25%
+    Training | Epoch: 0 | Loss: 115.1939 | Acc: 11.25%
+    Training | Epoch: 0 | Loss: 115.2703 | Acc: 8.50%
+    Training | Epoch: 0 | Loss: 114.8635 | Acc: 13.25%
+    Training | Epoch: 0 | Loss: 115.0566 | Acc: 11.25%
+    Training | Epoch: 0 | Loss: 114.9189 | Acc: 11.50%
+    Training | Epoch: 0 | Loss: 115.0341 | Acc: 11.25%
+    Training | Epoch: 0 | Loss: 115.0187 | Acc: 12.00%
+    Training | Epoch: 0 | Loss: 115.1050 | Acc: 10.50%
+    Training | Epoch: 0 | Loss: 115.0171 | Acc: 9.75%
+    Training | Epoch: 0 | Loss: 114.8428 | Acc: 15.00%
+    Training | Epoch: 0 | Loss: 115.1016 | Acc: 12.50%
+    Training | Epoch: 0 | Loss: 115.3068 | Acc: 9.75%
+    Training | Epoch: 0 | Loss: 114.9911 | Acc: 12.50%
+    Training | Epoch: 0 | Loss: 115.2010 | Acc: 11.00%
+    Training | Epoch: 0 | Loss: 115.0805 | Acc: 11.25%
+    Training | Epoch: 0 | Loss: 115.0775 | Acc: 12.75%
+    Training | Epoch: 0 | Loss: 115.2626 | Acc: 7.50%
+    Training | Epoch: 0 | Loss: 114.9407 | Acc: 11.75%
+    Training | Epoch: 0 | Loss: 115.1194 | Acc: 9.50%
+    Training | Epoch: 0 | Loss: 115.2441 | Acc: 9.75%
+    Training | Epoch: 0 | Loss: 114.8342 | Acc: 14.25%
+    Training | Epoch: 0 | Loss: 114.7440 | Acc: 13.00%
+    Training | Epoch: 0 | Loss: 114.9432 | Acc: 14.25%
+    Training | Epoch: 0 | Loss: 115.1605 | Acc: 10.00%
+    Training | Epoch: 0 | Loss: 114.8367 | Acc: 13.75%
+    Training | Epoch: 0 | Loss: 115.0761 | Acc: 12.75%
+    Training | Epoch: 0 | Loss: 115.1689 | Acc: 11.50%
+    Training | Epoch: 0 | Loss: 115.3208 | Acc: 10.25%
+    Training | Epoch: 0 | Loss: 115.2924 | Acc: 9.00%
+    Training | Epoch: 0 | Loss: 115.0237 | Acc: 10.50%
+    Training | Epoch: 0 | Loss: 115.0111 | Acc: 10.75%
+    Training | Epoch: 0 | Loss: 115.2476 | Acc: 8.50%
+    Training | Epoch: 0 | Loss: 115.0139 | Acc: 12.50%
+    Training | Epoch: 0 | Loss: 115.1096 | Acc: 11.50%
+    Training | Epoch: 0 | Loss: 115.2500 | Acc: 10.25%
+    Training | Epoch: 0 | Loss: 115.1965 | Acc: 10.75%
+    Training | Epoch: 0 | Loss: 115.2571 | Acc: 9.75%
+    Training | Epoch: 0 | Loss: 115.0872 | Acc: 12.00%
+    Training | Epoch: 0 | Loss: 114.8736 | Acc: 12.75%
+    Training | Epoch: 0 | Loss: 115.3206 | Acc: 9.25%
+    Training | Epoch: 0 | Loss: 115.2455 | Acc: 8.50%
+    Training | Epoch: 0 | Loss: 114.9038 | Acc: 14.00%
+    Training | Epoch: 0 | Loss: 115.1354 | Acc: 10.25%
+    Training | Epoch: 0 | Loss: 114.9552 | Acc: 12.00%
+    Training | Epoch: 0 | Loss: 115.0186 | Acc: 10.00%
+    Training | Epoch: 0 | Loss: 114.9936 | Acc: 12.75%
+    Training | Epoch: 0 | Loss: 115.1694 | Acc: 10.25%
+    Training | Epoch: 0 | Loss: 115.1393 | Acc: 10.75%
+    Training | Epoch: 0 | Loss: 115.0091 | Acc: 11.50%
+    Training | Epoch: 0 | Loss: 115.0358 | Acc: 9.50%
+    Training | Epoch: 0 | Loss: 114.9743 | Acc: 12.75%
+    Training | Epoch: 0 | Loss: 115.0091 | Acc: 11.50%
+    Training | Epoch: 0 | Loss: 114.8544 | Acc: 13.75%
+    Training | Epoch: 0 | Loss: 115.0109 | Acc: 13.50%
+    Training | Epoch: 0 | Loss: 115.1806 | Acc: 11.00%
+    Training | Epoch: 0 | Loss: 114.8155 | Acc: 12.75%
+    Training | Epoch: 0 | Loss: 114.9861 | Acc: 9.50%
+    Training | Epoch: 0 | Loss: 115.4122 | Acc: 9.75%
+    Training | Epoch: 0 | Loss: 114.9863 | Acc: 10.25%
+    Training | Epoch: 0 | Loss: 114.9625 | Acc: 13.25%
+    Training | Epoch: 0 | Loss: 115.2525 | Acc: 11.00%
+    Training | Epoch: 0 | Loss: 114.9907 | Acc: 11.50%
+    Training | Epoch: 0 | Loss: 115.1447 | Acc: 9.50%
+    Training | Epoch: 0 | Loss: 115.2017 | Acc: 10.50%
