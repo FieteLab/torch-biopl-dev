@@ -21,7 +21,7 @@ from bioplnn.models import SpatiallyEmbeddedRNN, SpatiallyEmbeddedAreaConfig
 
 What do we mean by this? In an attempt to distinguish synaptic transfer functions from post-aggregation neuronal transfer functions, we give users the ability to specify pre- and post-integration nonlinearities.
 
-Let us consider the same example model from the previous tutorial: A simple one-area network with two neural classes with the following `inter_neuron_type_connectivity`: $\begin{bmatrix}1&1&0\cr1&1&1\cr1&1&0\end{bmatrix}$. Following the same convention as the connectivity matrix, you can specify the transfer function for each of those synapse groups by setting the `inter_neuron_type_nonlinearity` parameter. Similarly, `neuron_type_nonlinearity` can be used to control the post-aggregation transfer function for each neuron type.
+Let us consider the same example model from the previous tutorial: A simple one-area network with two neural classes with the following `inter_neuron_type_connectivity`: $`\big(\begin{smallmatrix}1&1&0\cr1&1&1\cr1&1&0\end{smallmatrix}\big)`$. Following the same convention as the connectivity matrix, you can specify the transfer function for each of those synapse groups by setting the `inter_neuron_type_nonlinearity` parameter. Similarly, `neuron_type_nonlinearity` can be used to control the post-aggregation transfer function for each neuron type.
 
 If you were to construe a scenario where synapses have unbounded transfer functions while the neuron as whole is bounded from above (and for the sake of argument: bounded differently for the E and I subpopulations), then you'd do something like this:
 
@@ -62,10 +62,10 @@ model = SpatiallyEmbeddedRNN(num_areas=1, area_configs=area_configs, batch_first
 It must be evident that `inter_neuron_type_connectivity` is a powerful option that can be used to dictate a wide variety of microcircuit motifs. We provide some examples below for inspiration.
 
 #### Feedback inhibition
-Parvalbumin-positive inhibitory cells in Layer 2/3 of the cortex are known to interact with Pyramidal cells through some form of divisive inhibition [Jonke et al. (2017)](https://www.jneurosci.org/content/37/35/8511). To instantiate this microcircuit, you'd set `inter_neuron_type_connectivity` $= \begin{bmatrix}1&0&0\cr0&1&1\cr1&1&0\end{bmatrix}$ (conventions same as in the original example).
+Parvalbumin-positive inhibitory cells in Layer 2/3 of the cortex are known to interact with Pyramidal cells through some form of divisive inhibition [Jonke et al. (2017)](https://www.jneurosci.org/content/37/35/8511). To instantiate this microcircuit, you'd set `inter_neuron_type_connectivity` = $`\big(\begin{smallmatrix}1&0&0\cr0&1&1\cr1&1&0\end{smallmatrix}\big)`$ (conventions same as in the original example).
 
 #### Feedforward inhibition
-Feedforward inhibition is another essential mechanism within the brain, to regulate neuronal firing and prevent runaway excitation ([Panthi and Leitch (2019)](https://pubmed.ncbi.nlm.nih.gov/31494287/), [Large et al. (2016)](https://pmc.ncbi.nlm.nih.gov/articles/PMC4776521/)). To implement the microcircuit presented in these (and related) papers, you can set `inter_neuron_type_connectivity` $= \begin{bmatrix}1&1&0\cr1&0&1\cr1&1&1\end{bmatrix}$
+Feedforward inhibition is another essential mechanism within the brain, to regulate neuronal firing and prevent runaway excitation ([Panthi and Leitch (2019)](https://pubmed.ncbi.nlm.nih.gov/31494287/), [Large et al. (2016)](https://pmc.ncbi.nlm.nih.gov/articles/PMC4776521/)). To implement the microcircuit presented in these (and related) papers, you can set `inter_neuron_type_connectivity` = $`\big(\begin{smallmatrix}1&1&0\cr1&0&1\cr1&1&1\end{smallmatrix}\big)`$ (conventions same as in the original example).
 
 #### Pyr-PV-SST-VIP motif
 Interneuron subtypes play a critical role in several aspects of cortical function ([Guo and Kumar (2023)](https://www.nature.com/articles/s42003-023-05231-0), [Condylis et al. (2022)](https://www.science.org/doi/10.1126/science.abl5981), etc.). Of particular interest is a motif that involves one excitatory and three inhibitory interneuron populations (PV, SST, VIP). Please refer to these papers for pictorial depictions of the microcircuits. To realise this in `torch-biopl`, we would do the following:
@@ -88,7 +88,7 @@ model = SpatiallyEmbeddedRNN(num_areas=1, area_configs=area_configs, batch_first
 
 We remark that this is not an exhaustive list, but merely a window into endless possibilities :)
 
-## Parameter sharing capabilities for $ \tau_{mem} $
+## Parameter sharing capabilities for $\tau_{mem}$
 
 We provide the user the option to tie neural time constants:
 - Across space, but unique for each cell subtype (`tau_mode` = 'subtype')
