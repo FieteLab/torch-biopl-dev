@@ -1,7 +1,7 @@
 ## `torch-biopl`: Biologically-plausible neural networks made easy
 <p align="center" style="text-align: center">
 <a href="https://www.python.org"><img src="https://img.shields.io/badge/Python-3.12-3776AB.svg?style=flat&amp;logo=python&amp;logoColor=white" alt="python"></a>
-<a href="https://pytorch.org"><img src="https://img.shields.io/badge/PyTorch-2.6.0-EE4C2C.svg?style=flat&amp;logo=pytorch" alt="pytorch"></a>
+<a href="https://pytorch.org"><img src="https://img.shields.io/badge/PyTorch-2.5.1-EE4C2C.svg?style=flat&amp;logo=pytorch" alt="pytorch"></a>
 <a href="https://fietelab.github.io/torch-biopl-dev/"><img alt="torch-biopl" src="https://img.shields.io/badge/Project%20page-torch--biopl-black"></a>
 <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
 </p>
