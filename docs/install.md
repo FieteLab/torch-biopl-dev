@@ -101,7 +101,7 @@ pip install torch-sparse torch-scatter -f https://data.pyg.org/whl/torch-2.5.1+c
 Make sure you have installed the requirements as described [above](#requirements).
 Then, you can install the package using one of the following methods:
 
-### From PyPI (recommended) (not yet available)
+### From PyPI (not yet available)
 
 ```bash
 pip install torch-biopl

@@ -47,9 +47,46 @@ key_features_docstring = """
           `SparseRNN` class.
 """
 
+init_docstring = """
+Initialize ConnectomeRNN and ConnectomeODERNN.
+
+Args:
+    input_size: Size of the input layer.
+    num_neurons: Number of neurons in the network.
+    connectome: Connectivity matrix or path to it.
+    output_size: Size of the output layer. Defaults to None.
+    input_projection: Input projection matrix or path. Defaults to None.
+    output_projection: Output projection matrix or path. Defaults to None.
+    use_dense_input_projection: Use dense input projection if True.
+    use_dense_output_projection: Use dense output projection if True.
+    train_connectome: Train the connectome if True.
+    train_input_projection: Train input projection if True.
+    train_output_projection: Train output projection if True.
+    num_neuron_types: Number of neuron types.
+    neuron_type: Tensor/path defining neuron type indices. Required when
+        num_neuron_types > 0.
+    neuron_class: Neuron class specifications (excitatory/inhibitory).
+    neuron_class_mode: Determines if neuron classes are 'per_neuron' or
+        'per_neuron_type'.
+    neuron_tau_init: Initial time constants for neurons. Can provide
+        per-type or per-neuron values.
+    neuron_tau_init_fn: Initialization function for time constants
+        (clamped ≥ 1.0). Prefer initializers near 1.0 like 'ones'.
+    neuron_tau_mode: Whether tau is 'per_neuron' or 'per_neuron_type'.
+    train_tau: Whether time constants are trainable parameters.
+    neuron_nonlinearity: Nonlinearity for neurons. Can be single or list
+        of activations matching num_neuron_types.
+    default_neuron_state_init_fn: Hidden state initialization function.
+    connectome_bias: Add bias to connectome if True.
+    output_projection_bias: Add bias to output projection if True.
+    batch_first: Whether input tensors have batch dimension first.
+    compile_solver_kwargs: Kwargs for ODE solver compilation.
+    compile_update_fn_kwargs: Kwargs for update_fn compilation.
+"""
+
 
 class _ConnectomeRNNMixIn:
-    f"""MixIn for ConnectomeRNN and ConnectomeODERNN.
+    __doc__ = f"""MixIn for ConnectomeRNN and ConnectomeODERNN.
 
     This class is used for common initialization and forward methods for
     ConnectomeRNN and ConnectomeODERNN. It is not intended to be used directly.
@@ -108,42 +145,6 @@ class _ConnectomeRNNMixIn:
         compile_solver_kwargs: Optional[Mapping[str, Any]] = None,
         compile_update_fn_kwargs: Optional[Mapping[str, Any]] = None,
     ):
-        """Initialize ConnectomeRNN and ConnectomeODERNN.
-
-        Args:
-            input_size: Size of the input layer.
-            num_neurons: Number of neurons in the network.
-            connectome: Connectivity matrix or path to it.
-            output_size: Size of the output layer. Defaults to None.
-            input_projection: Input projection matrix or path. Defaults to None.
-            output_projection: Output projection matrix or path. Defaults to None.
-            use_dense_input_projection: Use dense input projection if True.
-            use_dense_output_projection: Use dense output projection if True.
-            train_connectome: Train the connectome if True.
-            train_input_projection: Train input projection if True.
-            train_output_projection: Train output projection if True.
-            num_neuron_types: Number of neuron types.
-            neuron_type: Tensor/path defining neuron type indices. Required when
-                num_neuron_types > 0.
-            neuron_class: Neuron class specifications (excitatory/inhibitory).
-            neuron_class_mode: Determines if neuron classes are 'per_neuron' or
-                'per_neuron_type'.
-            neuron_tau_init: Initial time constants for neurons. Can provide
-                per-type or per-neuron values.
-            neuron_tau_init_fn: Initialization function for time constants
-                (clamped ≥ 1.0). Prefer initializers near 1.0 like 'ones'.
-            neuron_tau_mode: Whether tau is 'per_neuron' or 'per_neuron_type'.
-            train_tau: Whether time constants are trainable parameters.
-            neuron_nonlinearity: Nonlinearity for neurons. Can be single or list
-                of activations matching num_neuron_types.
-            default_neuron_state_init_fn: Hidden state initialization function.
-            connectome_bias: Add bias to connectome if True.
-            output_projection_bias: Add bias to output projection if True.
-            batch_first: Whether input tensors have batch dimension first.
-            compile_solver_kwargs: Kwargs for ODE solver compilation.
-            compile_update_fn_kwargs: Kwargs for update_fn compilation.
-        """
-
         # Initialize parent class
         assert isinstance(self, (ConnectomeRNN, ConnectomeODERNN))
         kwargs = {
@@ -187,6 +188,8 @@ class _ConnectomeRNNMixIn:
             neuron_tau_init, neuron_tau_init_fn, neuron_tau_mode, train_tau
         )
         self._init_neuron_nonlinearity(neuron_nonlinearity)
+
+    __init__.__doc__ = init_docstring
 
     def _init_neuron_type(
         self,
@@ -543,7 +546,7 @@ class _ConnectomeRNNMixIn:
 
 
 class ConnectomeRNN(_ConnectomeRNNMixIn, SparseRNN):
-    f"""Connectome Recurrent Neural Network.
+    __doc__ = f"""Connectome Recurrent Neural Network.
 
     An RNN that leverages the `SparseRNN` class to efficiently simulate a
     sparsely-connected network of neurons with biologically-inspired dynamics.
@@ -617,7 +620,7 @@ class ConnectomeRNN(_ConnectomeRNNMixIn, SparseRNN):
 
 
 class ConnectomeODERNN(_ConnectomeRNNMixIn, SparseODERNN):
-    f"""Continuous-time ConnectomeRNN using ODE solver integration.
+    __doc__ = f"""Continuous-time ConnectomeRNN using ODE solver integration.
 
     A continuous-time version of the ConnectomeRNN that simulates neural
     dynamics using an ODE solver and computes the gradient with respect to the
@@ -629,7 +632,7 @@ class ConnectomeODERNN(_ConnectomeRNNMixIn, SparseODERNN):
           respect to the parameters. In the particular, the `torchode.AutoDiffAdjoint`
           solver allows for O(1) computational complexity for the backward pass with
           respect to the number of simulated timesteps.
-        {key_features_docstring}
+        - {key_features_docstring}
 
     Attributes:
         {attributes_docstring}
