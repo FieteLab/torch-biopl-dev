@@ -182,7 +182,7 @@ def validate_epoch(
     config: AttrDict,
     model: nn.Module | Callable,
     criterion: torch.nn.Module,
-    val_loader: torch.utils.data.DataLoader,
+    val_loader: Optional[torch.utils.data.DataLoader],
     device: torch.device,
 ) -> tuple[float, float]:
     """
@@ -198,6 +198,11 @@ def validate_epoch(
     Returns:
         tuple[float, float]: A tuple containing the val loss and accuracy.
     """
+    if val_loader is None:
+        print("Warning: val_loader is None, returning (0.0, 0.0)")
+        return 0.0, 0.0
+
+    print(f"Validation loader has {len(val_loader)} batches")
     model.eval()
     val_loss = 0.0
     val_correct = 0
@@ -237,6 +242,7 @@ def validate_epoch(
 
             # Compute the loss
             loss = criterion(logits, loss_labels)
+            print(f"Batch {i} validation loss: {loss.item():.4f}")
 
             # Update statistics
             val_loss += loss.item()
@@ -254,6 +260,7 @@ def validate_epoch(
     # Calculate average val loss and accuracy
     val_loss /= len(val_loader)
     val_acc = val_correct / val_total
+    print(f"Final validation loss: {val_loss:.4f}, accuracy: {val_acc:.2%}")
 
     return val_loss, val_acc
 
@@ -268,6 +275,12 @@ def train(dict_config: DictConfig) -> None:
 
     config = OmegaConf.to_container(dict_config, resolve=True)
     config = AttrDict(config)
+
+    # Set num_classes from data config
+    if hasattr(config.data, 'model') and hasattr(config.data.model, 'num_classes'):
+        config.model.num_classes = config.data.model.num_classes
+        # Remove model section from data config to avoid passing it to dataloader
+        del config.data.model
 
     # Override parameters
     def parse_overrides(original: Any, overrides: Any) -> Any:

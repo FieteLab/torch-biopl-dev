@@ -4,27 +4,54 @@ from typing import Optional
 import torch
 from torch import nn
 
-import bioplnn.utils.dataloaders as dataloaders
+from bioplnn.utils import dataloaders
 
 
-def initialize_dataloader(
-    *, dataset: str, seed: Optional[int] = None, **kwargs
-) -> tuple[torch.utils.data.DataLoader, torch.utils.data.DataLoader]:
-    """Initialize a dataloader for a given dataset.
+def initialize_dataloader(**kwargs):
+    """Initialize a dataloader based on the dataset name.
 
     Args:
-        dataset (str): The dataset to use.
-        seed (int, optional): The seed to use for the dataloader. Defaults to None.
-        **kwargs: Additional keyword arguments to pass to the dataloader.
+        **kwargs: Keyword arguments to pass to the dataloader initialization function.
 
     Returns:
-        tuple[torch.utils.data.DataLoader, torch.utils.data.DataLoader]:
-            The train and validation dataloaders.
+        tuple[torch.utils.data.DataLoader, torch.utils.data.DataLoader]: The train and validation dataloaders.
     """
+    dataset = kwargs.pop("dataset")
+    if dataset == "mnist":
+        train_loader, val_loader = dataloaders.get_mnist_dataloaders(**kwargs)
+    elif dataset == "cifar10":
+        train_loader, val_loader = dataloaders.get_cifar10_dataloaders(**kwargs)
+    elif dataset == "cifar100":
+        train_loader, val_loader = dataloaders.get_cifar100_dataloaders(**kwargs)
+    elif dataset == "mnist_v1":
+        train_loader, val_loader = dataloaders.get_mnist_v1_dataloaders(**kwargs)
+    elif dataset == "cifar10_v1":
+        train_loader, val_loader = dataloaders.get_cifar10_v1_dataloaders(**kwargs)
+    elif dataset == "cifar100_v1":
+        train_loader, val_loader = dataloaders.get_cifar100_v1_dataloaders(**kwargs)
+    elif dataset == "mazes":
+        try:
+            train_loader, val_loader = dataloaders.get_mazes_dataloaders(**kwargs)
+        except Exception:
+            # If validation dataset fails to load, try loading only training dataset
+            kwargs["train_only"] = True
+            train_loader, _ = dataloaders.get_mazes_dataloaders(**kwargs)
+            # Split training dataset into train and validation sets
+            train_loader, val_loader = dataloaders.split_train_dataset(
+                train_loader,
+                val_ratio=0.2,
+                seed=kwargs.get("seed"),
+            )
+    elif dataset == "cabc":
+        train_loader, val_loader = dataloaders.get_cabc_dataloaders(**kwargs)
+    elif dataset == "qclevr":
+        train_loader, val_loader = dataloaders.get_qclevr_dataloaders(**kwargs)
+    elif dataset == "correlated_dots":
+        train_loader, val_loader = dataloaders.get_correlated_dots_dataloaders(**kwargs)
+    else:
+        raise ValueError(f"Dataset {dataset} not implemented")
 
-    return getattr(dataloaders, f"get_{dataset}_dataloaders")(
-        **kwargs, seed=seed
-    )
+    return train_loader, val_loader
 
 
 def initialize_model(*, class_name: str, **kwargs) -> nn.Module:

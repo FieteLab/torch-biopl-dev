@@ -1,0 +1,5 @@
+optimizer.lr: choice(0.001, 0.0005, 0.0001)
+train.forward_kwargs.num_steps: choice(10, 20)
+train.epochs: choice(50, 100)
+model.rnn_kwargs.area_kwargs.0.neuron_type_nonlinearity: choice(Sigmoid, ReLU)
+model.rnn_kwargs.area_kwargs.0.inter_neuron_type_spatial_extents: choice([3,3], [5,5]) 

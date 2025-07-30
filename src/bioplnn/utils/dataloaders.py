@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Optional, Sized, TypeVar
 
 import torch
 import torchvision.transforms as T
@@ -188,6 +188,7 @@ def get_mazes_dataloaders(
     num_workers: int = 0,
     seed: Optional[int] = None,
     shuffle_test: bool = False,
+    train_only: bool = False,
 ):
     from bioplnn.datasets import Mazes
 
@@ -206,13 +207,6 @@ def get_mazes_dataloaders(
         return_metadata=return_metadata,
         transform=transform,
     )
-    val_dataset = Mazes(
-        root=root,
-        train=False,
-        subset=subset,
-        return_metadata=return_metadata,
-        transform=transform,
-    )
 
     train_dataloader = DataLoader(
         train_dataset,
@@ -225,6 +219,18 @@ def get_mazes_dataloaders(
         if seed is not None
         else None,
     )
+
+    if train_only:
+        return train_dataloader, None
+
+    val_dataset = Mazes(
+        root=root,
+        train=False,
+        subset=subset,
+        return_metadata=return_metadata,
+        transform=transform,
+    )
+
     val_dataloader = DataLoader(
         val_dataset,
         batch_size=batch_size,
@@ -574,3 +580,56 @@ def get_cifar100_v1_dataloaders(
         seed=seed,
         shuffle_test=shuffle_test,
     )
+
+
+def split_train_dataset(
+    train_loader: torch.utils.data.DataLoader,
+    val_ratio: float = 0.2,
+    seed: Optional[int] = None,
+) -> tuple[torch.utils.data.DataLoader, torch.utils.data.DataLoader]:
+    """Split a training dataset into train and validation sets.
+
+    Args:
+        train_loader (torch.utils.data.DataLoader): The training dataloader to split.
+        val_ratio (float, optional): Ratio of validation set. Defaults to 0.2.
+        seed (Optional[int], optional): Random seed for splitting. Defaults to None.
+
+    Returns:
+        tuple[torch.utils.data.DataLoader, torch.utils.data.DataLoader]:
+            The train and validation dataloaders.
+    """
+    dataset = train_loader.dataset
+    total_size = len(dataset)  # type: ignore
+    train_size = int((1 - val_ratio) * total_size)
+    val_size = total_size - train_size
+
+    if seed is not None:
+        generator = torch.Generator().manual_seed(seed)
+    else:
+        generator = None
+
+    train_subset, val_subset = torch.utils.data.random_split(
+        dataset, [train_size, val_size], generator=generator
+    )
+
+    train_loader = torch.utils.data.DataLoader(
+        train_subset,
+        batch_size=train_loader.batch_size,
+        shuffle=True,
+        num_workers=train_loader.num_workers,
+        pin_memory=train_loader.pin_memory,
+        worker_init_fn=train_loader.worker_init_fn,
+        generator=train_loader.generator,
+    )
+
+    val_loader = torch.utils.data.DataLoader(
+        val_subset,
+        batch_size=train_loader.batch_size,
+        shuffle=False,
+        num_workers=train_loader.num_workers,
+        pin_memory=train_loader.pin_memory,
+        worker_init_fn=train_loader.worker_init_fn,
+        generator=train_loader.generator,
+    )
+
+    return train_loader, val_loader

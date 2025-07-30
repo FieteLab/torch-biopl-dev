@@ -28,3 +28,12 @@
 /shared_data/
 /examples/data/
 /examples/*.pt
+
+
+/train/checkpoints/
+/train/outputs/
+/train/slurm_outputs/
+/train/wandb/
+launch_jupyter.sh
+jupyter.out
+*.png

@@ -441,13 +441,22 @@ class SpatiallyEmbeddedArea(nn.Module):
                 "rows and columns in the connectivity matrix."
             )
 
-        # Format connectivity variables to match circuit connectivity
-        self.inter_neuron_type_spatial_extents = expand_array_2d(
-            config.inter_neuron_type_spatial_extents,
-            self.inter_neuron_type_connectivity.shape[0],
-            self.inter_neuron_type_connectivity.shape[1],
-            depth=1,
-        )
+        #Format connectivity variables to match circuit connectivity
+        if not isinstance(config.inter_neuron_type_spatial_extents, np.ndarray):
+            self.inter_neuron_type_spatial_extents = expand_array_2d(
+                config.inter_neuron_type_spatial_extents,
+                self.inter_neuron_type_connectivity.shape[0],
+                self.inter_neuron_type_connectivity.shape[1],
+                depth=1,
+            )
+        else:
+            self.inter_neuron_type_spatial_extents = config.inter_neuron_type_spatial_extents
+        # self.inter_neuron_type_spatial_extents = expand_array_2d(
+        #         config.inter_neuron_type_spatial_extents,
+        #         self.inter_neuron_type_connectivity.shape[0],
+        #         self.inter_neuron_type_connectivity.shape[1],
+        #         depth=1,
+        # )
         self.inter_neuron_type_num_subtype_groups = expand_array_2d(
             config.inter_neuron_type_num_subtype_groups,
             self.inter_neuron_type_connectivity.shape[0],
@@ -625,6 +634,9 @@ class SpatiallyEmbeddedArea(nn.Module):
             config.default_feedback_state_init_fn
         )
         self.default_output_state_init_fn = config.default_output_state_init_fn
+
+        # print(self.summary())
+        # print(vars(self)) 
 
     def _source_from_row_idx(self, idx: int) -> Optional[str]:
         """Converts a row index to the corresponding source.

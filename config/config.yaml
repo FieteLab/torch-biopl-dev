@@ -28,6 +28,7 @@ train:
   log_freq: 10
   forward_kwargs:
     loss_all_timesteps: false
+    num_steps: 10
   grad_clip:
     enable: false
     type: norm
@@ -43,7 +44,7 @@ wandb:
   group: null
 activations:
   save_root: activations/ei
-  save_activations: true
+  save_activations: false
   num_samples: 10
   shuffle_test: true
 seed: null

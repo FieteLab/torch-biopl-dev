@@ -3,3 +3,6 @@ root: ./data/mazes/
 resolution: null
 batch_size: 512
 num_workers: 8
+
+model:
+  num_classes: 2
