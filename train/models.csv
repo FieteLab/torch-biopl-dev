@@ -20,3 +20,4 @@ cosmic-forest-354,0.001,345600,20,,512,"[32, 8]",512,32,ReLU,ReLU,"(5, 5)",none,
 apricot-durian-360,0.001,345600,10,,512,"[32, 8]",512,32,ReLU,Identity,"(5, 5)",none,1e1i1a,1200.0,
 fine-sky-361,0.001,345600,10,,512,"[32, 8]",512,32,ReLU,ReLU,"(5, 5)",none,1e1i1a,1200.0,
 crisp-meadow-403,0.005,345600,20,,512,"[8, 4]",512,8,ReLU,ReLU,"(5, 5)",none,1e1i1a,400.0,"{'name': 'OneCycleLR', 'kwargs': {'pct_start': 0.1, 'anneal_strategy': 'cos', 'div_factor': 25}}"
+celestial-frost-412,0.001,345600,20,,512,"[8, 4]",512,8,ReLU,ReLU,"(5, 5)",none,1e1i1a,600.0,"{'name': 'OneCycleLR', 'kwargs': {'pct_start': 0.15, 'anneal_strategy': 'cos', 'div_factor': 10}}"

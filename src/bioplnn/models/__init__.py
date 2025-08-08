@@ -9,12 +9,14 @@ from .spatially_embedded import (
     SpatiallyEmbeddedArea,
     SpatiallyEmbeddedAreaConfig,
     SpatiallyEmbeddedRNN,
+    Ablation,
 )
 
 __all__ = [
     "SpatiallyEmbeddedRNN",
     "SpatiallyEmbeddedArea",
     "SpatiallyEmbeddedAreaConfig",
+    "Ablation",
     "SparseLinear",
     "SparseRNN",
     "SpatiallyEmbeddedClassifier",

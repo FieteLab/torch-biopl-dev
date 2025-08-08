@@ -240,6 +240,7 @@ class SpatiallyEmbeddedClassifier(nn.Module):
         num_steps: Optional[int] = None,
         loss_all_timesteps: bool = False,
         return_activations: bool = False,
+        ablater = None
     ) -> Union[
         torch.Tensor,
         Tuple[
@@ -268,7 +269,7 @@ class SpatiallyEmbeddedClassifier(nn.Module):
                 If return_activations is True, returns a tuple of
                 (predictions, outputs, hidden neuron states, feedback signals).
         """
-        outs, h_neurons, fbs = self.rnn(x, num_steps=num_steps)
+        outs, h_neurons, fbs = self.rnn(x, num_steps=num_steps, ablater=ablater)
 
         outs_last_layer = outs[-1]
         if self.rnn.batch_first:

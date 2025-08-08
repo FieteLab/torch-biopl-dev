@@ -33,10 +33,10 @@ from bioplnn.utils import (
     pass_fn,
 )
 
-maze_data_path = "/om2/user/jackking/torch-bioplnn-dev/data/mazes"
-checkpoint_path = "/om2/user/jackking/torch-bioplnn-dev/train/checkpoints/"
-model_csv_path = "/om2/user/jackking/torch-bioplnn-dev/train/models.csv"
-model_configs_path = "/om2/user/jackking/torch-bioplnn-dev/train/model_configs.json"
+maze_data_path = "/om2/vast/evlab/jackking/torch-bioplnn-dev/data/mazes"
+checkpoint_path = "/om2/vast/evlab/jackking/torch-bioplnn-dev/train/checkpoints/"
+model_csv_path = "/om2/vast/evlab/jackking/torch-bioplnn-dev/train/models.csv"
+model_configs_path = "/om2/vast/evlab/jackking/torch-bioplnn-dev/train/model_configs.json"
 
 # Torch setup
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -68,11 +68,14 @@ class SimpleCNN(nn.Module):
         return x
 
 def load_data(batch_size=BATCH_SIZE, num_samples=None):
-
     # Get the data loaders
     train_loader, test_loader = initialize_dataloader(
         seed=42, root="./data/mazes/", batch_size=batch_size, dataset="mazes"
     )
+
+    # Note: num_samples parameter is currently unused
+    # If you want to implement subsampling, you'd need to modify the dataloader
+    # or add a sampler that limits the number of samples
 
     return train_loader, test_loader
 
@@ -188,7 +191,7 @@ def analyze_logits(logits, labels, num_samples=5, detailed=False):
         pred_dist = dict(zip(unique, counts))
         print(f"Prediction distribution: {pred_dist}")
 
-def train(model, train_loader, test_loader, criterion, optimizer, scheduler, num_steps, max_epochs, train_log_frequency, wandb_name, run):
+def train(model, train_loader, test_loader, criterion, optimizer, scheduler, num_steps, max_epochs, max_gradient, train_log_frequency, wandb_name, run, start_epoch=0):
     # Define the training loop
     model.train()
 
@@ -212,7 +215,7 @@ def train(model, train_loader, test_loader, criterion, optimizer, scheduler, num
     save_path = f"{checkpoint_path}/{wandb_name}"
     os.makedirs(save_path, exist_ok=True)
     
-    for epoch in range(max_epochs):
+    for epoch in range(start_epoch, max_epochs):
         run.config.update({"n_epochs": epoch}, allow_val_change=True)
         running_loss, running_correct, running_total = 0, 0, 0
         for i, (x, labels) in enumerate(tqdm(train_loader)):
@@ -230,11 +233,12 @@ def train(model, train_loader, test_loader, criterion, optimizer, scheduler, num
             optimizer.zero_grad()
             loss.backward()
             
-            # # Gradient clipping
-            # torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            
             # Gradient analysis
             grad_norm = get_gradient_norm(model)
+
+            # Gradient clipping
+            if max_gradient is not None:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_gradient)
             
             optimizer.step()
             if scheduler is not None:
@@ -297,9 +301,14 @@ def train(model, train_loader, test_loader, criterion, optimizer, scheduler, num
         })
         
         if epoch % 10 == 0:
-            # Save model 
-            sd = model.module.state_dict() if isinstance(model, nn.DataParallel) else model.state_dict()
-            torch.save(sd, f"{save_path}/{epoch}.pth")
+            # Save full checkpoint with model, optimizer, and scheduler state
+            checkpoint = {
+                'epoch': epoch,
+                'model_state': model.module.state_dict() if isinstance(model, nn.DataParallel) else model.state_dict(),
+                'opt_state': optimizer.state_dict(),
+                'sched_state': scheduler.state_dict() if scheduler else None,
+            }
+            torch.save(checkpoint, f"{save_path}/{epoch}.pth")
         
         val_accs.append(val_acc)
         
@@ -311,6 +320,31 @@ def train(model, train_loader, test_loader, criterion, optimizer, scheduler, num
                 print(val_accs[-patience:])
                 # break
 
+def get_scheduler(scheduler_config, optimizer=None, train_loader=None, max_epochs=None, lr=None):
+    if scheduler_config is None:
+        return None
+
+    kwargs = scheduler_config["kwargs"].copy()
+
+    if "Cycle" in scheduler_config["name"]:
+        if lr is None:
+            raise ValueError("lr must be provided for Cycle schedulers")
+        kwargs["max_lr"] = lr
+        if train_loader is not None and max_epochs is not None:
+            kwargs["total_steps"] = len(train_loader) * max_epochs
+    elif "Lambda" in scheduler_config["name"]:
+        if train_loader is not None and "warmup_epochs" in scheduler_config:
+            warmup_steps = len(train_loader) * scheduler_config["warmup_epochs"]
+            kwargs["lr_lambda"] = lambda step: (step + 1) / warmup_steps if step < warmup_steps else 1.0
+
+    if optimizer is None:
+        raise ValueError("optimizer must be provided to create scheduler")
+
+    scheduler = initialize_scheduler(
+        class_name=scheduler_config["name"],
+        optimizer=optimizer,
+        **kwargs)
+    return scheduler
 
 
 def run_experiment(model_type, model_config, hyperparams):
@@ -334,6 +368,7 @@ def run_experiment(model_type, model_config, hyperparams):
     num_steps = hyperparams.get("num_steps", 60)
     max_epochs = hyperparams.get("max_epochs", 10)
     batch_size = hyperparams.get("batch_size", 128)
+    max_gradient = hyperparams.get("max_gradient", None)
     
     # Define the optimizer
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, betas=(0.9, 0.999))
@@ -355,15 +390,7 @@ def run_experiment(model_type, model_config, hyperparams):
     elif hyperparams.get("init_weights", "kaiming") == "zero":
         model.apply(init_weights_zero)
     
-    scheduler = hyperparams.get("scheduler", None)
-    if not scheduler == None:
-        scheduler = initialize_scheduler(
-            class_name=scheduler["name"],
-            optimizer=optimizer,
-            max_lr=lr,
-            total_steps = len(train_loader) * max_epochs,
-            **scheduler["kwargs"])
-
+    scheduler = get_scheduler(hyperparams.get("scheduler", None), optimizer=optimizer, train_loader=train_loader, max_epochs=max_epochs, lr=lr)
 
     run = wandb.init(
         project="mazes",  # Specify your project
@@ -375,7 +402,7 @@ def run_experiment(model_type, model_config, hyperparams):
     with open(checkpoint_path + f"{wandb_name}.pkl", "wb") as f:
         pickle.dump(full_config, f)
     
-    train(model, train_loader, test_loader, criterion, optimizer, scheduler, num_steps, max_epochs, train_log_frequency, wandb_name, run)
+    train(model, train_loader, test_loader, criterion, optimizer, scheduler, num_steps, max_epochs, max_gradient, train_log_frequency, wandb_name, run, start_epoch=0)
     
     # Evaluate final performance
     final_val_loss, final_val_acc = evaluate(model, test_loader, criterion, device, num_steps)
@@ -413,6 +440,29 @@ def run_sweep(sweep_config):
                             "neuron_type_class": np.array(["excitatory", "inhibitory"]),
                             "inter_neuron_type_connectivity": np.array(
                                 [[1, 1, 0], [1, 1, 1], [1, 0, 0]]
+                            ),
+                            "in_size": [48, 48],
+                            "in_channels": 4,
+                            "out_channels": 32,
+                            "inter_neuron_type_nonlinearity": np.array([[None, None, None], [None, None, None], [None, None, None]]),
+                            "inter_neuron_type_spatial_extents": (5,5),
+                        },
+                    ],
+                },
+                "num_classes": 2,
+                "fc_dim": 512,
+                "dropout": 0.2,
+            },
+            "1e1ii1a": {
+                "rnn_kwargs": {
+                    "num_areas": 1,
+                    "area_kwargs": [
+                        {
+                            "num_neuron_types": 2,
+                            "num_neuron_subtypes": np.array([32, 8]),
+                            "neuron_type_class": np.array(["excitatory", "inhibitory"]),
+                            "inter_neuron_type_connectivity": np.array(
+                                [[1, 1, 0], [1, 1, 1], [1, 1, 0]]
                             ),
                             "in_size": [48, 48],
                             "in_channels": 4,
@@ -613,11 +663,10 @@ def run_sweep(sweep_config):
                 if "out_channels" in hyperparams:
                     model_config["rnn_kwargs"]["area_kwargs"][0]["out_channels"] = hyperparams["out_channels"]
                 
-                print(hyperparams["inter_neuron_type_spatial_extents"])
                 # Handle inter_neuron_type_spatial_extents
                 if "inter_neuron_type_spatial_extents" in hyperparams:
                     if hyperparams["inter_neuron_type_spatial_extents"] == "center_excitation":
-                        model_config["rnn_kwargs"]["area_kwargs"][0]["inter_neuron_type_spatial_extents"] = np.array([[(5,5), (5,5), (5,5)], [(3,3), (3,3), (3,3)], [(5,5), (5,5), (5,5)]])
+                        model_config["rnn_kwargs"]["area_kwargs"][0]["inter_neuron_type_spatial_extents"] = np.array([[(5,5), (5,5), (5,5)], [(3,3), (3,3), (3,3)], [(7,7), (7,7), (7,7)]])
                     elif hyperparams["inter_neuron_type_spatial_extents"] == "center_inhibition":
                         model_config["rnn_kwargs"]["area_kwargs"][0]["inter_neuron_type_spatial_extents"] = np.array([[(5,5), (5,5), (5,5)], [(5,5), (5,5), (5,5)], [(3,3), (5,5), (5,5)]])
                     else:
@@ -690,14 +739,41 @@ def run_sweep(sweep_config):
     
     return results
 
-def run_from_checkpoint(wandb_name, epoch):
+def run_from_checkpoint(wandb_name, epoch, new_params={}):
     full_config = pickle.load(open(checkpoint_path + f"{wandb_name}.pkl", "rb"))
+    for param, value in new_params.items():
+        full_config[param] = value
+
     model_config = full_config["model_config"]
-    num_steps = full_config["num_steps"]
-    model = SpatiallyEmbeddedClassifier(**model_config).to(device)
-    state_dict = torch.load(checkpoint_path + f"{wandb_name}/{epoch}.pth")
-    model.load_state_dict(state_dict)
-    del state_dict
+    model_type = full_config.get("model_type", "1e1i1a")  # Default to bioplnn if not specified
+    
+    # Create the correct model type
+    if model_type == "cnn":
+        model = SimpleCNN(**model_config).to(device)
+    else:
+        model = SpatiallyEmbeddedClassifier(**model_config).to(device)
+    
+    # Wrap for multi-GPU if available
+    if torch.cuda.device_count() > 1:
+        print(f"Using {torch.cuda.device_count()} GPUs")
+        model = nn.DataParallel(model)
+    
+    # Load checkpoint
+    checkpoint = torch.load(checkpoint_path + f"{wandb_name}/{epoch}.pth")
+    
+    # Handle both old format (just state_dict) and new format (full checkpoint)
+    if isinstance(checkpoint, dict) and 'model_state' in checkpoint:
+        # New format - full checkpoint
+        model.load_state_dict(checkpoint['model_state'])
+        start_epoch = checkpoint['epoch'] + 1
+        print(f"Resuming from epoch {checkpoint['epoch']}, will start at epoch {start_epoch}")
+    else:
+        # Old format - just state dict
+        model.load_state_dict(checkpoint)
+        start_epoch = epoch + 1
+        print(f"Loaded old format checkpoint from epoch {epoch}, will start at epoch {start_epoch}")
+    
+    del checkpoint
     gc.collect()
     torch.cuda.empty_cache()
     
@@ -707,15 +783,35 @@ def run_from_checkpoint(wandb_name, epoch):
     num_steps = full_config.get("num_steps", 60)
     max_epochs = full_config.get("max_epochs", 10)
     batch_size = full_config.get("batch_size", 128)
+    max_gradient = full_config.get("max_gradient", None)
     
     # Define the optimizer
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, betas=(0.9, 0.999))
+    
+    # Load optimizer state if available in checkpoint
+    checkpoint = torch.load(checkpoint_path + f"{wandb_name}/{epoch}.pth")
+    if isinstance(checkpoint, dict) and 'opt_state' in checkpoint:
+        optimizer.load_state_dict(checkpoint['opt_state'])
+        print("Loaded optimizer state from checkpoint")
+    
     # Define the loss function
     criterion = nn.CrossEntropyLoss()
 
     train_loader, test_loader = load_data(batch_size=batch_size, num_samples=num_samples)
 
     train_log_frequency = max(1, len(train_loader) // 10)  # How often to log training metrics
+    
+    # Create scheduler
+    scheduler = get_scheduler(full_config.get("scheduler", None), optimizer=optimizer, train_loader=train_loader, max_epochs=max_epochs, lr=lr)
+    
+    # Load scheduler state if available in checkpoint
+    if isinstance(checkpoint, dict) and 'sched_state' in checkpoint and checkpoint['sched_state'] and scheduler:
+        scheduler.load_state_dict(checkpoint['sched_state'])
+        print("Loaded scheduler state from checkpoint")
+    
+    del checkpoint
+    gc.collect()
+    torch.cuda.empty_cache()
     
     run = wandb.init(
         project="mazes",  # Specify your project
@@ -727,7 +823,8 @@ def run_from_checkpoint(wandb_name, epoch):
     with open(checkpoint_path + f"{wandb_name}.pkl", "wb") as f:
         pickle.dump(full_config, f)
     
-    train(model, train_loader, test_loader, criterion, optimizer, num_steps, max_epochs, train_log_frequency, wandb_name, run)
+    # Call train with start_epoch parameter
+    train(model, train_loader, test_loader, criterion, optimizer, scheduler, num_steps, max_epochs, max_gradient, train_log_frequency, wandb_name, run, start_epoch)
     
     # Evaluate final performance
     final_val_loss, final_val_acc = evaluate(model, test_loader, criterion, device, num_steps)
@@ -742,24 +839,30 @@ def run_from_checkpoint(wandb_name, epoch):
 
 if __name__ == "__main__":
     print("Running sweep...")
+
+    # OnceCycleLR
+        # {"name": "OneCycleLR", "kwargs": {"pct_start": 0.15, "anneal_strategy": 'cos', "div_factor": 15}}
+    #LambdaLR
+        # {"name": "LambdaLR", "warmup_epochs": 50, "kwargs": {}}
     
     # Define sweep configuration``
     sweep_config = {
-        "model_types": ["1e1i1a"],
+        "model_types": ["1e1ii1a"],
         "hyperparams": {
             "lr": [0.0008],
             "num_samples": [345600],
             "num_steps": [20],
-            "max_epochs": [600],  
+            "max_epochs": [2400],  
             "batch_size": [1024],
             "num_neuron_subtypes": [[8, 4]],
             "fc_dim": [512],
             "out_channels": [8],
             "neuron_type_nonlinearity": ["ReLU"],  
             "inter_neuron_type_nonlinearity": ["ReLU"],
-            "inter_neuron_type_spatial_extents": [(5, 5)], #["center_excitation"],  #[(5, 5)], #["center_excitation"], 
+            "inter_neuron_type_spatial_extents": [(5,5)], #["center_excitation"], 
             "init_weights": ["none"],
-            "scheduler": [{"name": "OneCycleLR", "kwargs": {"pct_start": 0.15, "anneal_strategy": 'cos', "div_factor": 10}}]
+            "scheduler": [{"name": "OneCycleLR", "kwargs": {"pct_start": 0.15, "anneal_strategy": 'cos', "div_factor": 20}}],
+            "max_gradient": [10]
         },
         "model_configs": {
             "cnn": {
@@ -774,7 +877,11 @@ if __name__ == "__main__":
     # Run the sweep
     results = run_sweep(sweep_config)
 
-    # wandb_name = "fiery-planet-379"
-    # run_from_checkpoint(wandb_name, 990
+    # wandb_name = "faithful-plasma-440"
+    # new_params = {
+    #     "lr": 0.0008,
+    #     "scheduler": None
+    # }
+    # run_from_checkpoint(wandb_name, 950, new_params=new_params)
     # wandb_name = "apricot-durian-360"
     # run_from_checkpoint(wandb_name, 1190)

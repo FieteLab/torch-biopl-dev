@@ -3,13 +3,14 @@ from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from math import ceil
-from typing import Any, Optional, Union
+from typing import Any, Optional, Union, Callable
 
 import numpy as np
 import pandas as pd
 import torch
 from torch import nn
 from torch.nn import functional as F
+import copy
 
 from bioplnn.typing import (
     Array2dType,
@@ -27,7 +28,6 @@ from bioplnn.utils import (
 )
 
 # TODO: Some docstrings may be outdated, might need to update
-
 
 class Conv2dRectify(nn.Conv2d):
     """Applies a 2d convolution with nonnegative weights and biases."""
@@ -214,6 +214,78 @@ class SpatiallyEmbeddedAreaConfig:
             index=row_labels,
             columns=column_labels,
         )
+
+
+class Ablation():
+    """Configuration for ablation experiments.
+    
+    This class defines different types of ablations that can be applied to
+    a SpatiallyEmbeddedArea during forward pass.
+    
+    Attributes:
+        neuron_ablation_config: dictionary {neuron_type: neuron_index: ablation_type}
+    """
+    def __init__(self, input_ablation_config = None, neuron_ablation_config= None, connection_ablation_config= None, output_ablation_config= None):
+        self.input_ablation_config = input_ablation_config
+        self.neuron_ablation_config = neuron_ablation_config
+        self.connection_ablation_config = connection_ablation_config
+        self.output_ablation_config = output_ablation_config
+
+    
+    def neuron_ablation(self, neuron_state: list[torch.Tensor]) -> list[torch.Tensor]:
+        if self.neuron_ablation_config is None:
+            return neuron_state
+            
+        for neuron_type in self.neuron_ablation_config.keys():
+            for neuron_index in self.neuron_ablation_config[neuron_type].keys():
+                if self.neuron_ablation_config[neuron_type][neuron_index] == "zero":
+                    neuron_state[neuron_type][:, neuron_index, :, :] = 0
+                elif self.neuron_ablation_config[neuron_type][neuron_index] == "random":
+                    neuron_state[neuron_type][:, neuron_index, :, :] = torch.randn_like(neuron_state[neuron_type][:, neuron_index, :, :])
+                elif self.neuron_ablation_config[neuron_type][neuron_index] == "noise":
+                    neuron_state[neuron_type][:, neuron_index, :, :] += torch.randn_like(neuron_state[neuron_type][:, neuron_index, :, :]) * 0.1
+
+        return neuron_state
+
+    def input_ablation(self, input: torch.Tensor) -> torch.Tensor:
+        return input
+
+    def connection_ablation(self, conv: nn.Module, conv_key: str) -> nn.Module:
+        """Apply connection ablation to a convolution module.
+        
+        Args:
+            conv: Original convolution module
+            conv_key: Key identifying the convolution (e.g., "0->1")
+            
+        Returns:
+            Modified convolution module with ablation applied
+        """
+        if self.connection_ablation_config is None or conv_key not in self.connection_ablation_config:
+            return conv
+            
+        # Clone the convolution
+        conv_copy = copy.deepcopy(conv)
+            
+        # Apply ablations directly to the weight data
+        for (channel_in_idx, channel_out_idx), ablation_type in self.connection_ablation_config[conv_key].items():
+            if ablation_type == "zero":
+                # Zero out the specific connection
+                conv_copy[0].weight.data[channel_out_idx, channel_in_idx, :, :] = 0
+            elif ablation_type == "random":
+                # Replace with random weights
+                conv_copy[0].weight.data[channel_out_idx, channel_in_idx, :, :] = torch.randn_like(
+                    conv_copy.weight.data[channel_out_idx, channel_in_idx, :, :]
+                )
+            elif ablation_type == "noise":
+                # Add noise to the connection
+                conv_copy.weight[0].data[channel_out_idx, channel_in_idx, :, :] += torch.randn_like(
+                    conv_copy.weight.data[channel_out_idx, channel_in_idx, :, :]
+                ) * 0.1
+        
+        return conv_copy
+    
+    def output_ablation(self, output: torch.Tensor) -> torch.Tensor:
+        return output
 
 
 class SpatiallyEmbeddedArea(nn.Module):
@@ -880,6 +952,7 @@ class SpatiallyEmbeddedArea(nn.Module):
         input: torch.Tensor,
         neuron_state: Union[torch.Tensor, list[torch.Tensor]],
         feedback_state: Optional[torch.Tensor] = None,
+        ablation: Optional[Ablation] = None,
     ) -> tuple[torch.Tensor, Union[torch.Tensor, list[torch.Tensor]]]:
         """Forward pass of the SpatiallyEmbeddedArea.
 
@@ -889,6 +962,7 @@ class SpatiallyEmbeddedArea(nn.Module):
                 in_size[0], in_size[1]) for each neuron type i.
             feedback_state: Feedback input of shape (batch_size, feedback_channels,
                 in_size[0], in_size[1]).
+            ablation: Configuration for ablation experiments. If None, no ablation is applied.
 
         Returns:
             A tuple containing the output and new neuron hidden state.
@@ -908,6 +982,14 @@ class SpatiallyEmbeddedArea(nn.Module):
                 "use_feedback must be True if and only if feedback_state is provided."
             )
 
+        # Apply input ablation if specified
+        if ablation and ablation.input_ablation:
+            input = ablation.input_ablation(input)
+
+        # Apply neuron ablation if specified
+        if ablation and ablation.neuron_ablation:
+            neuron_state = ablation.neuron_ablation(neuron_state)
+
         # Compute convolutions for each connection in the circuit
         circuit_ins = (
             [input]
@@ -923,7 +1005,13 @@ class SpatiallyEmbeddedArea(nn.Module):
             else:
                 sign = 1
 
-            circuit_outs[j].append(sign * conv(circuit_ins[i]))
+            # Apply connection ablation if specified
+            if ablation and ablation.connection_ablation_config and key in ablation.connection_ablation_config:
+                # Get the modified convolution from the ablation class
+                conv_modified = ablation.connection_ablation(conv, key)
+                circuit_outs[j].append(sign * conv_modified(circuit_ins[i]))
+            else:
+                circuit_outs[j].append(sign * conv(circuit_ins[i]))
 
         # Update neuron states
         self._clamp_tau()
@@ -964,6 +1052,10 @@ class SpatiallyEmbeddedArea(nn.Module):
                 out.append(sign * conv(circuit_ins[i]))
 
         out = torch.stack(out, dim=0).sum(dim=0)
+
+        # Apply output ablation if specified
+        if ablation and ablation.output_ablation:
+            out = ablation.output_ablation(out)
 
         return out, neuron_state_new
 
@@ -1618,6 +1710,7 @@ class SpatiallyEmbeddedRNN(nn.Module):
             Sequence[Sequence[Optional[torch.Tensor]]]
         ] = None,
         feedback_state0: Optional[Sequence[Optional[torch.Tensor]]] = None,
+        ablater: Optional[dict[int, dict[int, Ablation]]] = None,
     ) -> tuple[
         list[torch.Tensor],
         list[list[torch.Tensor]],
@@ -1642,6 +1735,8 @@ class SpatiallyEmbeddedRNN(nn.Module):
                 should match the number of neuron types in that area.
             feedback_state0: Initial feedback inputs for each area. Length should match
                 the number of areas.
+            ablater: Dictionary mapping time steps to area-specific ablation configurations.
+                Format: {time_step: {area_index: AblationConfig}}. If None, no ablation is applied.
 
         Returns:
             A tuple containing:
@@ -1673,6 +1768,13 @@ class SpatiallyEmbeddedRNN(nn.Module):
         )
 
         for t in range(num_steps):
+
+            # Get the ablation config for the current time step
+            if ablater is not None and t in ablater:
+                step_ablations = ablater[t]
+            else:
+                step_ablations = {}
+
             for i, area in enumerate(self.areas):
                 # Compute area update and output
                 if i == 0:
@@ -1688,10 +1790,14 @@ class SpatiallyEmbeddedRNN(nn.Module):
                         self.areas[i].in_size,  # type: ignore
                     )
 
+                # Get ablation config for this area (or None)
+                ablation = step_ablations.get(i, None)
+
                 output_states[i][t], neuron_states[i][t] = area(
                     input=area_in,
                     neuron_state=neuron_states[i][t - 1],
                     feedback_state=feedback_states[i][t - 1],
+                    ablation=ablation,
                 )
 
             # Apply feedback

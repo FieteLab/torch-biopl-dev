@@ -1,0 +1,6 @@
+name: bioplnn
+channels:
+  - defaults
+dependencies:
+  - python==3.12
+prefix: /om2/user/jackking/anaconda/envs/bioplnn
