@@ -29,7 +29,7 @@
 /examples/data/
 /examples/*.pt
 
-
+/feature_maps/
 /train/checkpoints/
 /train/outputs/
 /train/slurm_outputs/
@@ -37,3 +37,4 @@
 launch_jupyter.sh
 jupyter.out
 *.png
+*.out

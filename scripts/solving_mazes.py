@@ -44,28 +44,64 @@ torch.set_float32_matmul_precision("high")
 
 BATCH_SIZE = 32
 
-class SimpleCNN(nn.Module):
-    def __init__(self, in_channels=4, num_classes=2, dropout=0.2):
-        super(SimpleCNN, self).__init__()
-        self.conv1 = nn.Conv2d(in_channels, 64, kernel_size=5, padding=2)
-        self.conv2 = nn.Conv2d(64, 256, kernel_size=5, padding=2)
-        self.conv3 = nn.Conv2d(256, 512, kernel_size=5, padding=2)
-        self.pool = nn.MaxPool2d(2, 2)
-        self.fc1 = nn.Linear(512 * 6 * 6, 1024)
-        self.fc2 = nn.Linear(1024, num_classes)
-        self.dropout = nn.Dropout(dropout)
-        self.relu = nn.ReLU()
+class DSConv(nn.Module):
+    def __init__(self, in_ch, out_ch, stride=1):
+        super().__init__()
+        self.dw  = nn.Conv2d(in_ch, in_ch, 3, stride=stride, padding=1, groups=in_ch, bias=False)
+        self.pw  = nn.Conv2d(in_ch, out_ch, 1, bias=False)
+        self.bn  = nn.BatchNorm2d(out_ch)
+        self.act = nn.ReLU(inplace=True)
+    def forward(self, x):
+        x = self.dw(x)
+        x = self.pw(x)
+        x = self.bn(x)
+        return self.act(x)
+
+class TinyCNN(nn.Module):
+    def __init__(self, in_channels=4, num_classes=2, dropout=0.1):
+        super().__init__()
+        self.stem = nn.Sequential(
+            nn.Conv2d(in_channels, 16, 3, padding=1, bias=False),
+            nn.BatchNorm2d(16),
+            nn.ReLU(inplace=True),
+        )
+        self.block1 = DSConv(16, 32, stride=2)   # /2
+        self.block2 = DSConv(32, 64, stride=2)   # /2
+        self.block3 = DSConv(64, 64, stride=1)
+        self.pool   = nn.AdaptiveAvgPool2d(1)
+        self.head   = nn.Sequential(
+            nn.Flatten(),
+            nn.Dropout(dropout),
+            nn.Linear(64, num_classes)
+        )
+    def forward(self, x):
+        x = self.stem(x)
+        x = self.block1(x)
+        x = self.block2(x)
+        x = self.block3(x)
+        x = self.pool(x)       # -> [B, 64, 1, 1]
+        return self.head(x)    # -> [B, num_classes]
         
-    def forward(self, x, num_steps=None):  # num_steps parameter for compatibility
-        # x shape: [batch_size, channels, height, width]
-        x = self.pool(self.relu(self.conv1(x)))  # -> [batch_size, 32, 24, 24]
-        x = self.pool(self.relu(self.conv2(x)))  # -> [batch_size, 64, 12, 12]
-        x = self.pool(self.relu(self.conv3(x)))  # -> [batch_size, 128, 6, 6]
-        x = x.view(-1, 512 * 6 * 6)
-        x = self.relu(self.fc1(x))
-        x = self.dropout(x)
-        x = self.fc2(x)
-        return x
+class SimpleCNN(nn.Module):
+    def __init__(self, in_channels=4, num_classes=2, dropout=0.3):
+        super().__init__()
+        self.conv1 = nn.Conv2d(in_channels, 64,  kernel_size=5, padding=2)
+        self.conv2 = nn.Conv2d(64,          128, kernel_size=5, padding=2)
+        self.conv3 = nn.Conv2d(128,         256, kernel_size=5, padding=2)
+        self.pool  = nn.MaxPool2d(2, 2)
+        self.relu  = nn.ReLU(inplace=True)
+        self.dropout = nn.Dropout(dropout)
+
+        self.fc1 = nn.Linear(256 * 6 * 6, 512)
+        self.fc2 = nn.Linear(512, num_classes)
+
+    def forward(self, x):
+        x = self.pool(self.relu(self.conv1(x)))
+        x = self.pool(self.relu(self.conv2(x))) 
+        x = self.pool(self.relu(self.conv3(x)))
+        x = torch.flatten(x, 1)
+        x = self.dropout(self.relu(self.fc1(x)))
+        return self.fc2(x)
 
 def load_data(batch_size=BATCH_SIZE, num_samples=None):
     # Get the data loaders
@@ -80,7 +116,7 @@ def load_data(batch_size=BATCH_SIZE, num_samples=None):
     return train_loader, test_loader
 
 # Define evaluation function
-def evaluate(model, data_loader, criterion, device, num_steps):
+def evaluate(model, model_type, data_loader, criterion, device, num_steps):
     model.eval()
     total_loss = 0
     correct = 0
@@ -91,7 +127,10 @@ def evaluate(model, data_loader, criterion, device, num_steps):
             x = x.to(device)
             labels = labels.to(device)
             
-            logits = model(x, num_steps=num_steps)
+            if "cnn" in model_type:
+                logits = model(x)
+            else:
+                logits = model(x, num_steps=num_steps)
             loss = criterion(logits, labels)
             
             total_loss += loss.item()
@@ -191,7 +230,7 @@ def analyze_logits(logits, labels, num_samples=5, detailed=False):
         pred_dist = dict(zip(unique, counts))
         print(f"Prediction distribution: {pred_dist}")
 
-def train(model, train_loader, test_loader, criterion, optimizer, scheduler, num_steps, max_epochs, max_gradient, train_log_frequency, wandb_name, run, start_epoch=0):
+def train(model, model_type, train_loader, test_loader, criterion, optimizer, scheduler, num_steps, max_epochs, max_gradient, train_log_frequency, wandb_name, run, start_epoch=0):
     # Define the training loop
     model.train()
 
@@ -226,7 +265,11 @@ def train(model, train_loader, test_loader, criterion, optimizer, scheduler, num
             labels = labels.to(device)
             
             # Forward pass
-            logits = model(x, num_steps=num_steps, loss_all_timesteps=False)
+            if "cnn" in model_type:
+                logits = model(x)
+            else:
+                logits = model(x, num_steps=num_steps, loss_all_timesteps=False)
+
             loss = criterion(logits, labels)
             
             # Backward pass
@@ -291,7 +334,7 @@ def train(model, train_loader, test_loader, criterion, optimizer, scheduler, num
         )
 
         # Evaluate on validation set
-        val_loss, val_acc = evaluate(model, test_loader, criterion, device, num_steps)
+        val_loss, val_acc = evaluate(model, model_type, test_loader, criterion, device, num_steps)
         model.train()
         
         wandb.log({
@@ -349,13 +392,13 @@ def get_scheduler(scheduler_config, optimizer=None, train_loader=None, max_epoch
 
 def run_experiment(model_type, model_config, hyperparams):
     """Run a single experiment with the given model type, config and hyperparameters."""
-    # Create the model
-    if not model_type == "cnn":
-        model = SpatiallyEmbeddedClassifier(**model_config).to(device)
-    elif model_type == "cnn":
+    # Create the model        
+    if model_type == "cnn":
         model = SimpleCNN(**model_config).to(device)
+    elif model_type == "tiny_cnn":
+        model = TinyCNN(**model_config).to(device)
     else:
-        raise ValueError(f"Unknown model type: {model_type}")
+        model = SpatiallyEmbeddedClassifier(**model_config).to(device)
     
     # Wrap for multi‑GPU if available
     if torch.cuda.device_count() > 1:
@@ -402,7 +445,7 @@ def run_experiment(model_type, model_config, hyperparams):
     with open(checkpoint_path + f"{wandb_name}.pkl", "wb") as f:
         pickle.dump(full_config, f)
     
-    train(model, train_loader, test_loader, criterion, optimizer, scheduler, num_steps, max_epochs, max_gradient, train_log_frequency, wandb_name, run, start_epoch=0)
+    train(model, model_type, train_loader, test_loader, criterion, optimizer, scheduler, num_steps, max_epochs, max_gradient, train_log_frequency, wandb_name, run, start_epoch=0)
     
     # Evaluate final performance
     final_val_loss, final_val_acc = evaluate(model, test_loader, criterion, device, num_steps)
@@ -448,6 +491,44 @@ def run_sweep(sweep_config):
                             "inter_neuron_type_spatial_extents": (5,5),
                         },
                     ],
+                },
+                "num_classes": 2,
+                "fc_dim": 512,
+                "dropout": 0.2,
+            },
+            "1e1i1ef1a": {
+                "rnn_kwargs": {
+                    "num_areas": 2,
+                    "area_kwargs": [
+                        {
+                            "num_neuron_types": 2,
+                            "num_neuron_subtypes": np.array([8, 4]),
+                            "neuron_type_class": np.array(["excitatory", "inhibitory"]),
+                            "inter_neuron_type_connectivity": np.array(
+                                [[1, 1, 0], [1, 0, 0], [1, 1, 1], [1, 0, 1]]
+                            ),
+                            "in_size": [48, 48],
+                            "feedback_channels": 8,
+                            "in_channels": 4,
+                            "out_channels": 8,
+                            "inter_neuron_type_nonlinearity": np.array([["ReLU", "ReLU", "ReLU"], ["ReLU", "ReLU", "ReLU"], ["ReLU", "ReLU", "ReLU"], ["ReLU", "ReLU", "ReLU"]]),
+                            "inter_neuron_type_spatial_extents": (5,5),
+                        },
+                        {
+                            "num_neuron_types": 1,
+                            "num_neuron_subtypes": np.array([8]),
+                            "neuron_type_class": np.array(["excitatory"]),
+                            "inter_neuron_type_connectivity": np.array(
+                                [[1, 0], [1, 1]]
+                            ),
+                            "in_size": [48, 48],
+                            "in_channels": 8,
+                            "out_channels": 8,
+                            "inter_neuron_type_nonlinearity": np.array([["ReLU", "ReLU"], ["ReLU", "ReLU"]]),
+                            "inter_neuron_type_spatial_extents": (7,7),
+                        },
+                    ],
+                    "inter_area_feedback_connectivity": np.array([[0, 0],[1, 0]])
                 },
                 "num_classes": 2,
                 "fc_dim": 512,
@@ -584,7 +665,12 @@ def run_sweep(sweep_config):
             "cnn": {
                 "in_channels": 4,
                 "num_classes": 2,
-                "dropout": 0.2,
+                "dropout": 0.3,
+            },
+            "tiny_cnn": {
+                "in_channels": 4,
+                "num_classes": 2,
+                "dropout": 0.1,
             }
         }
 
@@ -634,8 +720,8 @@ def run_sweep(sweep_config):
             # Create a copy of the base model config
             model_config = copy.deepcopy(base_model_configs[model_type])
             
-            # Apply model-specific hyperparameters
-            if not model_type == "cnn":
+            # # Apply model-specific hyperparameters
+            if "cnn" not in model_type:
                 # Handle fc_dim
                 if "fc_dim" in hyperparams:
                     model_config["fc_dim"] = hyperparams["fc_dim"]
@@ -684,7 +770,7 @@ def run_sweep(sweep_config):
                 if "neuron_type_nonlinearity" in hyperparams:
                     model_config["rnn_kwargs"]["area_kwargs"][0]["neuron_type_nonlinearity"] = hyperparams["neuron_type_nonlinearity"]
                         
-            elif model_type == "cnn":
+            elif "cnn" in model_type:
                 # Apply any CNN-specific hyperparameters
                 if "fc_dim" in hyperparams:
                     # For CNN, we might ignore fc_dim or adapt it somehow
@@ -750,6 +836,8 @@ def run_from_checkpoint(wandb_name, epoch, new_params={}):
     # Create the correct model type
     if model_type == "cnn":
         model = SimpleCNN(**model_config).to(device)
+    elif model_type == "tiny_cnn":
+        model = TinyCNN(**model_config).to(device)
     else:
         model = SpatiallyEmbeddedClassifier(**model_config).to(device)
     
@@ -758,22 +846,45 @@ def run_from_checkpoint(wandb_name, epoch, new_params={}):
         print(f"Using {torch.cuda.device_count()} GPUs")
         model = nn.DataParallel(model)
     
-    # Load checkpoint
-    checkpoint = torch.load(checkpoint_path + f"{wandb_name}/{epoch}.pth")
+    # # Load checkpoint
+    # checkpoint = torch.load(checkpoint_path + f"{wandb_name}/{epoch}.pth")
     
-    # Handle both old format (just state_dict) and new format (full checkpoint)
-    if isinstance(checkpoint, dict) and 'model_state' in checkpoint:
-        # New format - full checkpoint
-        model.load_state_dict(checkpoint['model_state'])
-        start_epoch = checkpoint['epoch'] + 1
-        print(f"Resuming from epoch {checkpoint['epoch']}, will start at epoch {start_epoch}")
+    # # Handle both old format (just state_dict) and new format (full checkpoint)
+    # if isinstance(checkpoint, dict) and 'model_state' in checkpoint:
+    #     # New format - full checkpoint
+    #     model.load_state_dict(checkpoint['model_state'])
+    #     start_epoch = checkpoint['epoch'] + 1
+    #     print(f"Resuming from epoch {checkpoint['epoch']}, will start at epoch {start_epoch}")
+    # else:
+    #     # Old format - just state dict
+    #     model.load_state_dict(checkpoint)
+    #     start_epoch = epoch + 1
+    #     print(f"Loaded old format checkpoint from epoch {epoch}, will start at epoch {start_epoch}")
+    
+    # --- after you instantiate model (and wrap for multi-GPU if you do that) ---
+    ckpt = torch.load(os.path.join(checkpoint_path, wandb_name, f"{epoch}.pth"),
+                    map_location=device)  # keep weights_only=False for full ckpt dict
+
+    state = ckpt["model_state"]
+    start_epoch = ckpt['epoch'] + 1
+
+    # Load weights robustly across DP / non-DP
+    if isinstance(model, nn.DataParallel):
+        # checkpoint keys have no 'module.' → load into the underlying module
+        try:
+            model.module.load_state_dict(state)
+        except RuntimeError:
+            # If you ever saved with 'module.' keys, strip them:
+            state = {k.replace("module.", "", 1): v for k, v in state.items()}
+            model.module.load_state_dict(state)
     else:
-        # Old format - just state dict
-        model.load_state_dict(checkpoint)
-        start_epoch = epoch + 1
-        print(f"Loaded old format checkpoint from epoch {epoch}, will start at epoch {start_epoch}")
-    
-    del checkpoint
+        # Non-DP model: if the checkpoint has 'module.' keys, strip them
+        if any(k.startswith("module.") for k in state.keys()):
+            state = {k.replace("module.", "", 1): v for k, v in state.items()}
+        model.load_state_dict(state)
+
+    del ckpt
+    # del checkpoint
     gc.collect()
     torch.cuda.empty_cache()
     
@@ -824,7 +935,7 @@ def run_from_checkpoint(wandb_name, epoch, new_params={}):
         pickle.dump(full_config, f)
     
     # Call train with start_epoch parameter
-    train(model, train_loader, test_loader, criterion, optimizer, scheduler, num_steps, max_epochs, max_gradient, train_log_frequency, wandb_name, run, start_epoch)
+    train(model, model_type, train_loader, test_loader, criterion, optimizer, scheduler, num_steps, max_epochs, max_gradient, train_log_frequency, wandb_name, run, start_epoch)
     
     # Evaluate final performance
     final_val_loss, final_val_acc = evaluate(model, test_loader, criterion, device, num_steps)
@@ -847,41 +958,46 @@ if __name__ == "__main__":
     
     # Define sweep configuration``
     sweep_config = {
-        "model_types": ["1e1ii1a"],
+        "model_types": ["tiny_cnn"],
         "hyperparams": {
-            "lr": [0.0008],
+            "lr": [0.001],
             "num_samples": [345600],
-            "num_steps": [20],
-            "max_epochs": [2400],  
+            "max_epochs": [400],  
             "batch_size": [1024],
-            "num_neuron_subtypes": [[8, 4]],
-            "fc_dim": [512],
-            "out_channels": [8],
-            "neuron_type_nonlinearity": ["ReLU"],  
-            "inter_neuron_type_nonlinearity": ["ReLU"],
-            "inter_neuron_type_spatial_extents": [(5,5)], #["center_excitation"], 
             "init_weights": ["none"],
-            "scheduler": [{"name": "OneCycleLR", "kwargs": {"pct_start": 0.15, "anneal_strategy": 'cos', "div_factor": 20}}],
-            "max_gradient": [10]
+            "scheduler": [None], #[{"name": "OneCycleLR", "kwargs": {"pct_start": 0.05, "anneal_strategy": 'cos', "div_factor": 10}}],
+            "max_gradient": [3]
         },
-        "model_configs": {
-            "cnn": {
-                "dropout": 0.1,
-            },
-            "bioplnn": {
-                "dropout": 0.1,
-            }
-        }
     }
+
+    # sweep_config = {
+    #     "model_types": ["1e1ii1a"],
+    #     "hyperparams": {
+    #         "lr": [0.0012],
+    #         "num_samples": [345600],
+    #         "num_steps": [20],
+    #         "max_epochs": [2,400],  
+    #         "batch_size": [1024],
+    #         "num_neuron_subtypes": [[8, 4]],
+    #         "fc_dim": [512],
+    #         "out_channels": [8],
+    #         "neuron_type_nonlinearity": ["ReLU"],  
+    #         "inter_neuron_type_nonlinearity": ["ReLU"],
+    #         "inter_neuron_type_spatial_extents": [(5,5)], #[]"center_excitation"], 
+    #         "init_weights": ["none"],
+    #         "scheduler": [{"name": "OneCycleLR", "kwargs": {"pct_start": 0.15, "anneal_strategy": 'cos', "div_factor": 20}}],
+    #         "max_gradient": [5]
+    #     },
+    # }
     
     # Run the sweep
     results = run_sweep(sweep_config)
 
-    # wandb_name = "faithful-plasma-440"
+    # wandb_name = "confused-haze-455"
     # new_params = {
     #     "lr": 0.0008,
     #     "scheduler": None
     # }
-    # run_from_checkpoint(wandb_name, 950, new_params=new_params)
+    # run_from_checkpoint(wandb_name, 940, new_params=new_params)
     # wandb_name = "apricot-durian-360"
     # run_from_checkpoint(wandb_name, 1190)

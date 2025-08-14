@@ -1,14 +1,14 @@
 #!/bin/bash
 #SBATCH --job-name=mazes
-#SBATCH --time=6-00:00:00
-###SBATCH --gres=gpu:a100:1
+#SBATCH --time=2-00:00:00
+#SBATCH --gres=gpu:a100:1
 ###SBATCH --gres=gpu:RTXA6000:1
-#SBATCH --gres=gpu:GEFORCERTX2080:4
+###SBATCH --gres=gpu:GEFORCERTX2080:4
 
 #SBATCH --ntasks=1
 #SBATCH --mail-type=ALL
 #SBATCH --mail-user=jackking@mit.edu
-#SBATCH --partition=fiete
+###SBATCH --partition=fiete
 #SBATCH --mem=100G
 
 #SBATCH --output=/om2/vast/evlab/jackking/torch-bioplnn-dev/train/slurm_outputs/output_%j.txt
