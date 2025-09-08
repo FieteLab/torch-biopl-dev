@@ -38,3 +38,4 @@ launch_jupyter.sh
 jupyter.out
 *.png
 *.out
+Corr*

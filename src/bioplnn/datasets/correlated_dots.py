@@ -1,6 +1,6 @@
 import torch
 from torch.utils.data import Dataset
-
+import math
 
 class CorrelatedDots(Dataset):
     def __init__(
@@ -8,7 +8,7 @@ class CorrelatedDots(Dataset):
         resolution=(128, 128),
         n_frames=10,
         n_dots=100,
-        correlation=1.0,
+        correlation=1.0,           # can be float or (low, high)
         max_speed=5,
         samples_per_epoch=10000,
     ):
@@ -16,10 +16,11 @@ class CorrelatedDots(Dataset):
         Args:
             n_frames (int): Number of frames to generate.
             n_dots (int): Number of dots in each frame.
-            direction (str): Direction of motion ('right', 'left', 'up', 'down').
-            speed (int): Speed of the dot motion in pixels per frame.
             resolution (tuple): Size of each frame (height, width).
-            correlation (float): Correlation of dots' motion (0 to 1, where 1 is fully correlated, 0 is fully random).
+            correlation (float or tuple): If float, fixed correlation for all samples.
+                If tuple (low, high), each sample’s correlation is drawn uniformly
+                from [low, high].
+            max_speed (int): Max pixels per frame.
         """
         self.n_frames = n_frames
         self.n_dots = n_dots
@@ -28,70 +29,67 @@ class CorrelatedDots(Dataset):
         self.max_speed = max_speed
         self.samples_per_epoch = samples_per_epoch
 
+        # 8 directions: R, L, U, D, NE, NW, SE, SW
+        r2 = math.sqrt(2.0)
         self.direction_vectors = {
-            0: torch.tensor((1, 0)),  # Right
-            1: torch.tensor((-1, 0)),  # Left
-            2: torch.tensor((0, -1)),  # Up
-            3: torch.tensor((0, 1)),  # Down
+            0: torch.tensor(( 1.0,  0.0)),         # Right
+            1: torch.tensor((-1.0,  0.0)),         # Left
+            2: torch.tensor(( 0.0, -1.0)),         # Up
+            3: torch.tensor(( 0.0,  1.0)),         # Down
+            4: torch.tensor(( 1.0, -1.0)) / r2,    # NE
+            5: torch.tensor((-1.0, -1.0)) / r2,    # NW
+            6: torch.tensor(( 1.0,  1.0)) / r2,    # SE
+            7: torch.tensor((-1.0,  1.0)) / r2,    # SW
         }
 
     def __len__(self):
         return self.samples_per_epoch
 
     def __getitem__(self, idx):
-        height, width = self.resolution
+        H, W = self.resolution
         frames = []
 
-        # Initialize random dot positions
-        x = torch.rand(self.n_dots) * width
-        y = torch.rand(self.n_dots) * height
+        # pick correlation for THIS sample
+        if isinstance(self.correlation, (tuple, list)):
+            corr_value = torch.empty(1).uniform_(self.correlation[0], self.correlation[1]).item()
+        else:
+            corr_value = float(self.correlation)
 
-        # Determine the direction and speed vector for correlated dots
-        correlated_speed = 0
-        while correlated_speed == 0:
-            correlated_speed = (torch.rand(1) * self.max_speed).ceil()
-        correlated_direction = torch.randint(4, (1,)).squeeze()
+        # initial positions
+        x = torch.rand(self.n_dots) * W
+        y = torch.rand(self.n_dots) * H
 
-        correlated_dx, correlated_dy = (
-            self.direction_vectors[correlated_direction.item()]  # type: ignore
-            * correlated_speed
-        )
+        # correlated velocity
+        corr_speed = torch.randint(1, self.max_speed + 1, (1,), dtype=torch.float32)
+        corr_dir = torch.randint(len(self.direction_vectors), (1,))
+        corr_vec = self.direction_vectors[corr_dir.item()].to(dtype=torch.float32) * corr_speed
+        corr_dx, corr_dy = corr_vec[0].item(), corr_vec[1].item()
 
-        # Precompute random directions for uncorrelated dots
-        random_speed = torch.rand(self.n_dots) * self.max_speed
-        random_directions = torch.rand(self.n_dots) * 2 * torch.pi
-        random_dx = torch.cos(random_directions) * random_speed
-        random_dy = torch.sin(random_directions) * random_speed
+        # uncorrelated velocities (fixed per dot)
+        rnd_speed = torch.rand(self.n_dots) * self.max_speed
+        rnd_theta = torch.rand(self.n_dots) * (2 * torch.pi)
+        rnd_dx = torch.cos(rnd_theta) * rnd_speed
+        rnd_dy = torch.sin(rnd_theta) * rnd_speed
 
-        # Generate each frame
         for _ in range(self.n_frames):
-            # Create an empty frame
-            frame = torch.zeros(height, width)
+            frame = torch.zeros(H, W)
 
-            # Determine which dots move in the correlated direction
-            correlated_mask = torch.rand(self.n_dots) < self.correlation
+            # choose which dots are correlated this frame
+            mask = torch.rand(self.n_dots) < corr_value
 
-            # Apply correlated movement
-            x[correlated_mask] = (x[correlated_mask] + correlated_dx) % width
-            y[correlated_mask] = (y[correlated_mask] + correlated_dy) % height
+            # update positions
+            x[mask]  = torch.remainder(x[mask]  + corr_dx, W)
+            y[mask]  = torch.remainder(y[mask]  + corr_dy, H)
+            x[~mask] = torch.remainder(x[~mask] + rnd_dx[~mask], W)
+            y[~mask] = torch.remainder(y[~mask] + rnd_dy[~mask], H)
 
-            # Apply random movement to uncorrelated dots
-            x[~correlated_mask] = (
-                x[~correlated_mask] + random_dx[~correlated_mask]
-            ) % width
-            y[~correlated_mask] = (
-                y[~correlated_mask] + random_dy[~correlated_mask]
-            ) % height
-
-            # Draw dots on the frame
-            x_int = x.long()
-            y_int = y.long()
-            frame[y_int, x_int] = 1  # Set the pixel to 1 (white dot)
+            # safe integer indices
+            xi = torch.clamp(x.long(), 0, W - 1)
+            yi = torch.clamp(y.long(), 0, H - 1)
+            frame[yi, xi] = 1.0
 
             frames.append(frame)
 
         frames = torch.stack(frames).unsqueeze(1)
-
-        assert frames.shape == (self.n_frames, 1, height, width)
-
-        return frames, correlated_direction
+        assert frames.shape == (self.n_frames, 1, H, W)
+        return frames, corr_dir

@@ -1,31 +1,42 @@
-import argparse
-import copy
-import gc
-import json
-import os
-import pickle
-from datetime import datetime
-from functools import partial
-import random
-
-import GPUtil  # type: ignore
 import numpy as np
-import psutil
 import torch
+import pickle
+import pandas as pd
+import torchvision.transforms as T
 from torch import nn
+from torch.utils.data import DataLoader
+from torchvision.datasets import MNIST
 from tqdm import tqdm
-import wandb  # type: ignore
+import os
+import json
+import matplotlib.pyplot as plt
+from IPython.display import clear_output
+import wandb
+import psutil
+import GPUtil
+from functools import partial
+import gc
+import copy
+wandb.login(key="a338f755915cccd861b14f29bf68601d8e1ec2c9")
 
-from bioplnn.models import SpatiallyEmbeddedClassifier
+from bioplnn.models import SpatiallyEmbeddedClassifier, SpatiallyEmbeddedAreaConfig, SpatiallyEmbeddedRNN
+from bioplnn.datasets import Mazes
+
 from bioplnn.utils import (
+    initialize_criterion,
     initialize_dataloader,
+    initialize_model,
+    initialize_optimizer,
     initialize_scheduler,
     manual_seed,
+    manual_seed_deterministic,
+    pass_fn,
 )
 
-# Defaults (override with CLI)
-maze_data_path = "./data/mazes"
-checkpoint_path = "./train/checkpoints"
+maze_data_path = "/om2/vast/evlab/jackking/torch-bioplnn-dev/data/mazes"
+checkpoint_path = "/om2/vast/evlab/jackking/torch-bioplnn-dev/train/checkpoints/"
+model_csv_path = "/om2/vast/evlab/jackking/torch-bioplnn-dev/train/models.csv"
+model_configs_path = "/om2/vast/evlab/jackking/torch-bioplnn-dev/train/model_configs.json"
 
 # Torch setup
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -74,29 +85,33 @@ class TinyCNN(nn.Module):
 class SimpleCNN(nn.Module):
     def __init__(self, in_channels=4, num_classes=2, dropout=0.3):
         super().__init__()
-        self.conv1 = nn.Conv2d(in_channels, 64, kernel_size=5, padding=2)
-        self.conv2 = nn.Conv2d(64, 64, kernel_size=5, padding=2)
-        self.conv3 = nn.Conv2d(64, 128, kernel_size=5, padding=2)
+        self.conv1 = nn.Conv2d(in_channels, 32,  kernel_size=5, padding=2)
+        self.conv2 = nn.Conv2d(32,          32, kernel_size=5, padding=2)
+        self.conv3 = nn.Conv2d(32,         64, kernel_size=5, padding=2)
         self.pool  = nn.MaxPool2d(2, 2)
         self.relu  = nn.ReLU(inplace=True)
         self.dropout = nn.Dropout(dropout)
-        self.gap   = nn.AdaptiveAvgPool2d(1)     # <- NEW
-        self.fc1   = nn.Linear(128, 512)          # <- 64 channels only
-        self.fc2   = nn.Linear(512, num_classes)
+
+        self.fc1 = nn.Linear(64 * 6 * 6, 512)
+        self.fc2 = nn.Linear(512, num_classes)
 
     def forward(self, x):
         x = self.pool(self.relu(self.conv1(x)))
-        x = self.pool(self.relu(self.conv2(x)))
+        x = self.pool(self.relu(self.conv2(x))) 
         x = self.pool(self.relu(self.conv3(x)))
-        x = self.gap(x)                          # [B, 64, 1, 1]
-        x = torch.flatten(x, 1)                  # [B, 64]
+        x = torch.flatten(x, 1)
         x = self.dropout(self.relu(self.fc1(x)))
         return self.fc2(x)
 
-def load_data(dataset, **args):
+def load_data(batch_size=BATCH_SIZE, num_samples=None):
+    # Get the data loaders
     train_loader, test_loader = initialize_dataloader(
-        seed=42, dataset=dataset, **args
+        seed=42, root="./data/mazes/", batch_size=batch_size, dataset="mazes"
     )
+
+    # Note: num_samples parameter is currently unused
+    # If you want to implement subsampling, you'd need to modify the dataloader
+    # or add a sampler that limits the number of samples
 
     return train_loader, test_loader
 
@@ -113,17 +128,9 @@ def evaluate(model, model_type, data_loader, criterion, device, num_steps):
             labels = labels.to(device)
             
             if "cnn" in model_type:
-                if len(x.shape) == 5:
-                    x = x[:, :, 0, :, :]
                 logits = model(x)
             else:
                 logits = model(x, num_steps=num_steps)
-
-            if labels.ndim == 2 and labels.size(1) == 1:
-                labels = labels.squeeze(1)       # [N, 1] -> [N]
-            elif labels.ndim != 1:
-                raise ValueError(f"Expected labels shape [N] or [N,1], got {tuple(labels.shape)}")
-
             loss = criterion(logits, labels)
             
             total_loss += loss.item()
@@ -148,7 +155,7 @@ def get_cpu_memory():
 
 def get_gpu_utilization():
     """Get current GPU utilization percentage."""
-    if torch.cuda.is_available() and GPUtil is not None:
+    if torch.cuda.is_available():
         try:
             gpus = GPUtil.getGPUs()
             if gpus:
@@ -223,18 +230,18 @@ def analyze_logits(logits, labels, num_samples=5, detailed=False):
         pred_dist = dict(zip(unique, counts))
         print(f"Prediction distribution: {pred_dist}")
 
-def train(model, model_type, train_loader, test_loader, criterion, optimizer, scheduler, num_steps, max_epochs, max_gradient, train_log_frequency, run_name, run, n_frames_range=None, start_epoch=0, checkpoint_dir=checkpoint_path):
+def train(model, model_type, train_loader, test_loader, criterion, optimizer, scheduler, num_steps, max_epochs, max_gradient, train_log_frequency, wandb_name, run, start_epoch=0):
     # Define the training loop
     model.train()
 
-    # # Print initial diagnostics
-    # print("\nInitial Dataset Analysis:")
-    # print("=" * 50)
-    # train_dist = get_class_distribution(train_loader)
-    # test_dist = get_class_distribution(test_loader)
-    # print(f"Training set class distribution: {train_dist.numpy()}")
-    # print(f"Test set class distribution: {test_dist.numpy()}")
-    # print("=" * 50)
+    # Print initial diagnostics
+    print("\nInitial Dataset Analysis:")
+    print("=" * 50)
+    train_dist = get_class_distribution(train_loader)
+    test_dist = get_class_distribution(test_loader)
+    print(f"Training set class distribution: {train_dist.numpy()}")
+    print(f"Test set class distribution: {test_dist.numpy()}")
+    print("=" * 50)
 
     gpu_memory = get_gpu_memory()
     cpu_memory = get_cpu_memory()
@@ -242,14 +249,13 @@ def train(model, model_type, train_loader, test_loader, criterion, optimizer, sc
     print(f"GPU Memory: {gpu_memory:.1f}MB | CPU Memory: {cpu_memory:.1f}MB | GPU Utilization: {gpu_util:.1f}%")
 
     val_accs = []
-    patience = 200
+    patience = 30
 
-    save_path = f"{checkpoint_dir}/{run_name}"
+    save_path = f"{checkpoint_path}/{wandb_name}"
     os.makedirs(save_path, exist_ok=True)
     
     for epoch in range(start_epoch, max_epochs):
-        if run is not None:
-            run.config.update({"n_epochs": epoch}, allow_val_change=True)
+        run.config.update({"n_epochs": epoch}, allow_val_change=True)
         running_loss, running_correct, running_total = 0, 0, 0
         for i, (x, labels) in enumerate(tqdm(train_loader)):
             try:
@@ -257,25 +263,12 @@ def train(model, model_type, train_loader, test_loader, criterion, optimizer, sc
             except AttributeError:
                 x = [t.to(device) for t in x]
             labels = labels.to(device)
-
-            if n_frames_range is not None and num_steps is None:
-                n_frames = random.randint(n_frames_range[0], n_frames_range[1])
-                x = x[:, :n_frames]
-            
-            print(x.shape)
             
             # Forward pass
             if "cnn" in model_type:
-                if len(x.shape) == 5:
-                    x = x[:, :, 0, :, :]
                 logits = model(x)
             else:
                 logits = model(x, num_steps=num_steps, loss_all_timesteps=False)
-
-            if labels.ndim == 2 and labels.size(1) == 1:
-                labels = labels.squeeze(1)       # [N, 1] -> [N]
-            elif labels.ndim != 1:
-                raise ValueError(f"Expected labels shape [N] or [N,1], got {tuple(labels.shape)}")
 
             loss = criterion(logits, labels)
             
@@ -320,15 +313,14 @@ def train(model, model_type, train_loader, test_loader, criterion, optimizer, sc
                 # Use detailed analysis for first few batches
                 # analyze_logits(logits, labels, detailed=(i < 3))
 
-                if run is not None:
-                    wandb.log({
-                        "train_loss": running_loss / running_total,
-                        "train_acc": running_correct / running_total,
-                        "gradient_norm": grad_norm,
-                        "step": epoch * len(train_loader) + i,
-                        "lr": optimizer.param_groups[0]["lr"]
-                    })
-            
+                wandb.log({
+                    "train_loss": running_loss / running_total,
+                    "train_acc": running_correct / running_total,
+                    "gradient_norm": grad_norm,
+                    "step": epoch * len(train_loader) + i,
+                    "lr": optimizer.param_groups[0]["lr"]
+                })
+        
         # Calculate epoch metrics
         epoch_loss = running_loss / running_total
         epoch_acc = running_correct / running_total
@@ -345,12 +337,11 @@ def train(model, model_type, train_loader, test_loader, criterion, optimizer, sc
         val_loss, val_acc = evaluate(model, model_type, test_loader, criterion, device, num_steps)
         model.train()
         
-        if run is not None:
-            wandb.log({
-                "epoch": epoch,
-                "val_loss": val_loss,
-                "val_acc": val_acc,
-            })
+        wandb.log({
+            "epoch": epoch,
+            "val_loss": val_loss,
+            "val_acc": val_acc,
+        })
         
         if epoch % 10 == 0:
             # Save full checkpoint with model, optimizer, and scheduler state
@@ -370,15 +361,7 @@ def train(model, model_type, train_loader, test_loader, criterion, optimizer, sc
                 print("Validation accuracy not improving, stopping training")
                 print(f"Best validation accuracy: {best_val_acc:.2%}")
                 print(val_accs[-patience:])
-                # Save full checkpoint with model, optimizer, and scheduler state
-                checkpoint = {
-                    'epoch': epoch,
-                    'model_state': model.module.state_dict() if isinstance(model, nn.DataParallel) else model.state_dict(),
-                    'opt_state': optimizer.state_dict(),
-                    'sched_state': scheduler.state_dict() if scheduler else None,
-                }
-                torch.save(checkpoint, f"{save_path}/{epoch}.pth")
-                break
+                # break
 
 def get_scheduler(scheduler_config, optimizer=None, train_loader=None, max_epochs=None, lr=None):
     if scheduler_config is None:
@@ -407,28 +390,8 @@ def get_scheduler(scheduler_config, optimizer=None, train_loader=None, max_epoch
     return scheduler
 
 
-def run_experiment(
-    model_type,
-    model_config,
-    dataset="mazes",
-    lr=0.001,
-    num_steps=60,
-    max_epochs=10,
-    batch_size=128,
-    max_gradient=None,
-    scheduler_config=None,
-    init_weights="kaiming",
-    neuron_type_nonlinearity="relu",
-    data_root=maze_data_path,
-    checkpoints_dir=checkpoint_path,
-    wandb_project=False,
-    seed=42,
-    n_frames_range=None,
-    dots_kwargs = {}
-):
+def run_experiment(model_type, model_config, hyperparams):
     """Run a single experiment with the given model type, config and hyperparameters."""
-    manual_seed(seed)
-
     # Create the model        
     if model_type == "cnn":
         model = SimpleCNN(**model_config).to(device)
@@ -442,84 +405,74 @@ def run_experiment(
         print(f"Using {torch.cuda.device_count()} GPUs")
         model = nn.DataParallel(model)
     
-    # Optimizer and loss
+    # Extract hyperparameters
+    lr = hyperparams.get("lr", 0.001)
+    num_samples = hyperparams.get("num_samples", 100)
+    num_steps = hyperparams.get("num_steps", 60)
+    max_epochs = hyperparams.get("max_epochs", 10)
+    batch_size = hyperparams.get("batch_size", 128)
+    max_gradient = hyperparams.get("max_gradient", None)
+    
+    # Define the optimizer
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, betas=(0.9, 0.999))
+    # Define the loss function
     criterion = nn.CrossEntropyLoss()
 
-    if dataset == "mazes":
-        train_loader, test_loader = load_data(dataset, batch_size=batch_size, root=data_root)
-    elif dataset == "correlated_dots":
-        train_loader, test_loader = load_data(dataset, batch_size=batch_size, **dots_kwargs)
+    train_loader, test_loader = load_data(batch_size=batch_size, num_samples=num_samples)
 
-    train_log_frequency = max(1, len(train_loader) // 10)
+    train_log_frequency = max(1, len(train_loader) // 10)  # How often to log training metrics
         
     full_config = {
-        "model_type": model_type,
-        "model_config": model_config,
-        "lr": lr,
-        "num_steps": num_steps,
-        "max_epochs": max_epochs,
-        "batch_size": batch_size,
-        "max_gradient": max_gradient,
-        "scheduler": scheduler_config,
-        "init_weights": init_weights,
-        "seed": seed,
-        "dots_kwargs": dots_kwargs
-    }
+            "model_type": model_type,
+            "model_config": model_config,
+            **hyperparams,
+        }
 
-    if init_weights == "kaiming":
-        model.apply(partial(init_weights_kaiming, nonlinearity=neuron_type_nonlinearity))
-    elif init_weights == "zero":
+    if hyperparams.get("init_weights", "kaiming") == "kaiming":
+        model.apply(partial(init_weights_kaiming, nonlinearity=hyperparams.get("neuron_type_nonlinearity", "relu")))
+    elif hyperparams.get("init_weights", "kaiming") == "zero":
         model.apply(init_weights_zero)
     
-    scheduler = get_scheduler(scheduler_config, optimizer=optimizer, train_loader=train_loader, max_epochs=max_epochs, lr=lr) if scheduler_config else None
+    scheduler = get_scheduler(hyperparams.get("scheduler", None), optimizer=optimizer, train_loader=train_loader, max_epochs=max_epochs, lr=lr)
 
-    # Logging
-    run = None
-    run_name = datetime.now().strftime("run-%Y%m%d-%H%M%S")
-    if wandb_project:
-        if wandb is None:
-            raise RuntimeError("wandb is not installed but --wandb-project was True")
-        run = wandb.init(project=dataset, config=full_config)
-        run_name = run.name
+    run = wandb.init(
+        project="mazes",  # Specify your project
+        config=full_config,
+    )
+    wandb_name = run.name
 
-    # Save run config
-    os.makedirs(checkpoints_dir, exist_ok=True)
-    with open(os.path.join(checkpoints_dir, f"{run_name}.pkl"), "wb") as f:
+    #save model config
+    with open(checkpoint_path + f"{wandb_name}.pkl", "wb") as f:
         pickle.dump(full_config, f)
     
-    # Train
-    train(
-        model,
-        model_type,
-        train_loader,
-        test_loader,
-        criterion,
-        optimizer,
-        scheduler,
-        num_steps,
-        max_epochs,
-        max_gradient,
-        train_log_frequency,
-        run_name,
-        run,
-        n_frames_range=n_frames_range,
-        start_epoch=0,
-        checkpoint_dir=checkpoints_dir,
-    )
+    train(model, model_type, train_loader, test_loader, criterion, optimizer, scheduler, num_steps, max_epochs, max_gradient, train_log_frequency, wandb_name, run, start_epoch=0)
     
     # Evaluate final performance
     final_val_loss, final_val_acc = evaluate(model, model_type, test_loader, criterion, device, num_steps)
-    if run is not None:
-        wandb.log({
-            "final_val_loss": final_val_loss,
-            "final_val_acc": final_val_acc,
-        })
-        wandb.finish()
+    wandb.log({
+        "final_val_loss": final_val_loss,
+        "final_val_acc": final_val_acc,
+    })
+
+    hyperparams["wandb_name"] = wandb_name
+    hyperparams["model_type"] = model_type
+    #add hyperparams to model_csv
+    models_csv = pd.read_csv(model_csv_path)
+    models_csv = pd.concat([models_csv, pd.DataFrame([hyperparams])], ignore_index=True)
+    models_csv.to_csv(model_csv_path, index=False)
+    
+    wandb.finish()
     
     return final_val_loss, final_val_acc
 
-BASE_MODEL_CONFIGS = {
+def run_sweep(sweep_config):
+    """Run a sweep of experiments with different hyperparameters."""
+    results = []
+    
+    # Extract sweep parameters
+    model_types = sweep_config.get("model_types", ["bioplnn"])
+    # Define base model configs
+    base_model_configs = {  #TODO: make these a bunch of yaml files in the model_configs folder
             "1e1i1a": {
                 "rnn_kwargs": {
                     "num_areas": 1,
@@ -712,7 +665,7 @@ BASE_MODEL_CONFIGS = {
             "cnn": {
                 "in_channels": 4,
                 "num_classes": 2,
-                "dropout": 0.35,
+                "dropout": 0.3,
             },
             "tiny_cnn": {
                 "in_channels": 4,
@@ -721,73 +674,159 @@ BASE_MODEL_CONFIGS = {
             }
         }
 
-def apply_model_overrides(model_type: str, model_config: dict, overrides: dict) -> dict:
-    cfg = copy.deepcopy(model_config)
-    if "cnn" in model_type:
-        # Currently only common overrides apply to non-CNN models
-        return cfg
-
-    # fc_dim override
-    fc_dim = overrides.get("fc_dim")
-    if fc_dim is not None:
-        cfg["fc_dim"] = fc_dim
-
-    area0 = cfg.get("rnn_kwargs", {}).get("area_kwargs", [{}])[0]
-    if not area0:
-        return cfg
-
-    # out_channels override
-    out_channels = overrides.get("out_channels")
-    if out_channels is not None:
-        area0["out_channels"] = out_channels
-
-    # num_neuron_subtypes override (int or list)
-    nnst = overrides.get("num_neuron_subtypes")
-    if nnst is not None:
-        num_types = area0.get("num_neuron_types", None)
-        if isinstance(nnst, int):
-            if num_types is None:
-                raise ValueError("num_neuron_types missing in base config while applying num_neuron_subtypes=int")
-            area0["num_neuron_subtypes"] = np.ones(int(num_types), dtype=int) * int(nnst)
-        elif isinstance(nnst, (list, tuple, np.ndarray)):
-            area0["num_neuron_subtypes"] = np.array(list(map(int, nnst)))
-
-    # inter_neuron_type_connectivity - not exposed via CLI in example, keep for completeness
-    if "inter_neuron_type_connectivity" in overrides and overrides["inter_neuron_type_connectivity"] is not None:
-        area0["inter_neuron_type_connectivity"] = np.array(overrides["inter_neuron_type_connectivity"])
-
-    # inter_neuron_type_spatial_extents
-    spatial_extents = overrides.get("inter_neuron_type_spatial_extents")
-    if spatial_extents is not None:
-        if isinstance(spatial_extents, str):
-            if spatial_extents == "center_excitation":
-                area0["inter_neuron_type_spatial_extents"] = np.array([[(5,5), (5,5), (5,5)], [(3,3), (3,3), (3,3)], [(7,7), (7,7), (7,7)]])
-            elif spatial_extents == "center_inhibition":
-                area0["inter_neuron_type_spatial_extents"] = np.array([[(5,5), (5,5), (5,5)], [(5,5), (5,5), (5,5)], [(3,3), (5,5), (5,5)]])
+    # Generate hyperparameter combinations
+    hyperparams_list = []
+    
+    # Helper function to generate all combinations of hyperparameters
+    def generate_combinations(params_dict, current_combo=None, keys=None):
+        if current_combo is None:
+            current_combo = {}
+            keys = list(params_dict.keys())
+        
+        if not keys:
+            return [current_combo]
+        
+        combinations = []
+        key = keys[0]
+        values = params_dict[key]
+        
+        for value in values:
+            new_combo = current_combo.copy()
+            new_combo[key] = value
+            combinations.extend(generate_combinations(
+                params_dict, new_combo, keys[1:]
+            ))
+        
+        return combinations
+    
+    # Generate all hyperparameter combinations
+    if "hyperparams" in sweep_config:
+        hyperparams_list = generate_combinations(sweep_config["hyperparams"])
     else:
-            # expects tuple like (h, w)
-            area0["inter_neuron_type_spatial_extents"] = spatial_extents
+        # Default hyperparameters if none specified
+        hyperparams_list = [{
+            "lr": 0.001,
+            "num_samples": 100,
+            "num_steps": 60,
+            "max_epochs": 10,
+            "batch_size": 128,
+        }]
+    
+    # Run experiments for all combinations
+    for model_type in model_types:
+        for hyperparams in hyperparams_list:
+            print(f"\nRunning experiment with model_type={model_type}, hyperparams={hyperparams}")
+            
+            # Create a copy of the base model config
+            model_config = copy.deepcopy(base_model_configs[model_type])
+            
+            # # Apply model-specific hyperparameters
+            if "cnn" not in model_type:
+                # Handle fc_dim
+                if "fc_dim" in hyperparams:
+                    model_config["fc_dim"] = hyperparams["fc_dim"]
+                
+                if "num_neuron_types" in hyperparams:
+                    model_config["rnn_kwargs"]["area_kwargs"][0]["num_neuron_types"] = hyperparams["num_neuron_types"]
+                num_neuron_types = model_config["rnn_kwargs"]["area_kwargs"][0]["num_neuron_types"]
+                
+                # Handle num_neuron_subtypes
+                if "num_neuron_subtypes" in hyperparams:
+                    # Convert to numpy array with 2 elements (for excitatory and inhibitory)
+                    subtypes_value = hyperparams["num_neuron_subtypes"]
+                    if isinstance(subtypes_value, int):
+                        # If a single integer is provided, use it for both types
+                        model_config["rnn_kwargs"]["area_kwargs"][0]["num_neuron_subtypes"] = np.ones(num_neuron_types, dtype=int) * subtypes_value
+                    elif isinstance(subtypes_value, (list, tuple)) and len(subtypes_value) == num_neuron_types:
+                        # If a list/tuple of 2 values is provided, use them directly
+                        model_config["rnn_kwargs"]["area_kwargs"][0]["num_neuron_subtypes"] = np.array(subtypes_value)
 
-    # inter_neuron_type_nonlinearity (single token to fill matrix)
-    inter_nt_nl = overrides.get("inter_neuron_type_nonlinearity")
-    if inter_nt_nl is not None:
-        connectivity = area0.get("inter_neuron_type_connectivity")
-        if connectivity is None:
-            raise ValueError("inter_neuron_type_connectivity missing; cannot derive matrix shape for nonlinearity")
-        rows, cols = connectivity.shape
-        area0["inter_neuron_type_nonlinearity"] = np.full((rows, cols), inter_nt_nl)
+                # Handle inter_neuron_type_connectivity
+                if "inter_neuron_type_connectivity" in hyperparams:
+                    model_config["rnn_kwargs"]["area_kwargs"][0]["inter_neuron_type_connectivity"] = np.array(hyperparams["inter_neuron_type_connectivity"])
+                
+                # Handle out_channels
+                if "out_channels" in hyperparams:
+                    model_config["rnn_kwargs"]["area_kwargs"][0]["out_channels"] = hyperparams["out_channels"]
+                
+                # Handle inter_neuron_type_spatial_extents
+                if "inter_neuron_type_spatial_extents" in hyperparams:
+                    if hyperparams["inter_neuron_type_spatial_extents"] == "center_excitation":
+                        model_config["rnn_kwargs"]["area_kwargs"][0]["inter_neuron_type_spatial_extents"] = np.array([[(5,5), (5,5), (5,5)], [(3,3), (3,3), (3,3)], [(7,7), (7,7), (7,7)]])
+                    elif hyperparams["inter_neuron_type_spatial_extents"] == "center_inhibition":
+                        model_config["rnn_kwargs"]["area_kwargs"][0]["inter_neuron_type_spatial_extents"] = np.array([[(5,5), (5,5), (5,5)], [(5,5), (5,5), (5,5)], [(3,3), (5,5), (5,5)]])
+                    else:
+                        model_config["rnn_kwargs"]["area_kwargs"][0]["inter_neuron_type_spatial_extents"] = hyperparams["inter_neuron_type_spatial_extents"]
+                                
+                # Handle nonlinearity
+                if "inter_neuron_type_nonlinearity" in hyperparams:
+                    # Get the connectivity matrix shape
+                    connectivity = model_config["rnn_kwargs"]["area_kwargs"][0]["inter_neuron_type_connectivity"]
+                    rows, cols = connectivity.shape
+                    # Create a matrix of the same shape filled with the chosen nonlinearity
+                    nonlinearity_matrix = np.full((rows, cols), hyperparams["inter_neuron_type_nonlinearity"])
+                    model_config["rnn_kwargs"]["area_kwargs"][0]["inter_neuron_type_nonlinearity"] = nonlinearity_matrix
+                
+                if "neuron_type_nonlinearity" in hyperparams:
+                    model_config["rnn_kwargs"]["area_kwargs"][0]["neuron_type_nonlinearity"] = hyperparams["neuron_type_nonlinearity"]
+                        
+            elif "cnn" in model_type:
+                # Apply any CNN-specific hyperparameters
+                if "fc_dim" in hyperparams:
+                    # For CNN, we might ignore fc_dim or adapt it somehow
+                    pass
+            
+            # Apply any other model config overrides from sweep_config
+            if "model_configs" in sweep_config and model_type in sweep_config["model_configs"]:
+                # Deep update the nested dictionary
+                def update_dict(d, u):
+                    for k, v in u.items():
+                        if isinstance(v, dict) and k in d and isinstance(d[k], dict):
+                            update_dict(d[k], v)
+                        else:
+                            d[k] = v
+                
+                update_dict(model_config, sweep_config["model_configs"][model_type])
 
-    # neuron_type_nonlinearity (per-type nonlinearity)
-    nt_nl = overrides.get("neuron_type_nonlinearity")
-    if nt_nl is not None:
-        area0["neuron_type_nonlinearity"] = nt_nl
+            
+            try:
+                val_loss, val_acc = run_experiment(
+                    model_type=model_type,
+                    model_config=model_config,
+                    hyperparams=hyperparams
+                )
+                
+                # Store results
+                results.append({
+                    "model_type": model_type,
+                    "model_config": model_config,
+                    "hyperparams": hyperparams,
+                    "val_loss": val_loss,
+                    "val_acc": val_acc,
+                })
 
-    # Write back area0
-    cfg["rnn_kwargs"]["area_kwargs"][0] = area0
-    return cfg
+                print(f"Experiment completed: val_loss={val_loss:.4f}, val_acc={val_acc:.4f}")
+                
+            except Exception as e:
+                print(f"Error in experiment: {e}")
+                import traceback
+                traceback.print_exc()
+                wandb.finish()
+    
+    # Find best model
+    if results:
+        best_result = max(results, key=lambda x: x["val_acc"])
+        print("\n" + "="*50)
+        print(f"Best model: {best_result['model_type']}")
+        print(f"Best hyperparameters: {best_result['hyperparams']}")
+        print(f"Validation accuracy: {best_result['val_acc']:.4f}")
+        print(f"Validation loss: {best_result['val_loss']:.4f}")
+        print("="*50)
+    
+    return results
 
-def run_from_checkpoint(wandb_name, epoch, new_params={}, checkpoints_dir=checkpoint_path, data_root=maze_data_path, wandb_project=False):
-    full_config = pickle.load(open(os.path.join(checkpoints_dir, f"{wandb_name}.pkl"), "rb"))
+def run_from_checkpoint(wandb_name, epoch, new_params={}):
+    full_config = pickle.load(open(checkpoint_path + f"{wandb_name}.pkl", "rb"))
     for param, value in new_params.items():
         full_config[param] = value
 
@@ -823,7 +862,7 @@ def run_from_checkpoint(wandb_name, epoch, new_params={}, checkpoints_dir=checkp
     #     print(f"Loaded old format checkpoint from epoch {epoch}, will start at epoch {start_epoch}")
     
     # --- after you instantiate model (and wrap for multi-GPU if you do that) ---
-    ckpt = torch.load(os.path.join(checkpoints_dir, wandb_name, f"{epoch}.pth"),
+    ckpt = torch.load(os.path.join(checkpoint_path, wandb_name, f"{epoch}.pth"),
                     map_location=device)  # keep weights_only=False for full ckpt dict
 
     state = ckpt["model_state"]
@@ -851,6 +890,7 @@ def run_from_checkpoint(wandb_name, epoch, new_params={}, checkpoints_dir=checkp
     
     # Extract hyperparameters
     lr = full_config.get("lr", 0.001)
+    num_samples = full_config.get("num_samples", 100)
     num_steps = full_config.get("num_steps", 60)
     max_epochs = full_config.get("max_epochs", 10)
     batch_size = full_config.get("batch_size", 128)
@@ -860,7 +900,7 @@ def run_from_checkpoint(wandb_name, epoch, new_params={}, checkpoints_dir=checkp
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, betas=(0.9, 0.999))
     
     # Load optimizer state if available in checkpoint
-    checkpoint = torch.load(os.path.join(checkpoints_dir, f"{wandb_name}/{epoch}.pth"))
+    checkpoint = torch.load(checkpoint_path + f"{wandb_name}/{epoch}.pth")
     if isinstance(checkpoint, dict) and 'opt_state' in checkpoint:
         optimizer.load_state_dict(checkpoint['opt_state'])
         print("Loaded optimizer state from checkpoint")
@@ -868,7 +908,7 @@ def run_from_checkpoint(wandb_name, epoch, new_params={}, checkpoints_dir=checkp
     # Define the loss function
     criterion = nn.CrossEntropyLoss()
 
-    train_loader, test_loader = load_data(batch_size=batch_size, root=data_root)
+    train_loader, test_loader = load_data(batch_size=batch_size, num_samples=num_samples)
 
     train_log_frequency = max(1, len(train_loader) // 10)  # How often to log training metrics
     
@@ -884,223 +924,80 @@ def run_from_checkpoint(wandb_name, epoch, new_params={}, checkpoints_dir=checkp
     gc.collect()
     torch.cuda.empty_cache()
     
-    run = None
-    if wandb_projec:
-        run = wandb.init(
-            project=dataset,
-            config=full_config,
-        )
+    run = wandb.init(
+        project="mazes",  # Specify your project
+        config=full_config,
+    )
 
-    wandb_name = run.name if run is not None else wandb_name
+    wandb_name = run.name
     #save model config
-    with open(os.path.join(checkpoints_dir, f"{wandb_name}.pkl"), "wb") as f:
+    with open(checkpoint_path + f"{wandb_name}.pkl", "wb") as f:
         pickle.dump(full_config, f)
     
     # Call train with start_epoch parameter
-    train(model, model_type, train_loader, test_loader, criterion, optimizer, scheduler, num_steps, max_epochs, max_gradient, train_log_frequency, wandb_name, run, start_epoch, checkpoint_dir=checkpoints_dir)
+    train(model, model_type, train_loader, test_loader, criterion, optimizer, scheduler, num_steps, max_epochs, max_gradient, train_log_frequency, wandb_name, run, start_epoch)
     
     # Evaluate final performance
-    final_val_loss, final_val_acc = evaluate(model, model_type, test_loader, criterion, device, num_steps)
-    if run is not None:
-        wandb.log({
-            "final_val_loss": final_val_loss,
-            "final_val_acc": final_val_acc,
-        })
-        wandb.finish()
+    final_val_loss, final_val_acc = evaluate(model, test_loader, criterion, device, num_steps)
+    wandb.log({
+        "final_val_loss": final_val_loss,
+        "final_val_acc": final_val_acc,
+    })
+    
+    wandb.finish()
     
     return final_val_loss, final_val_acc
 
-def parse_tuple(s):
-    if "," in s:
-        parts = s.split(",")
-        if len(parts) != 2:
-            raise argparse.ArgumentTypeError("range must be two numbers: low,high")
-        try:
-            low, high = map(float, parts)
-            if low.is_integer():
-                low = int(low)
-                high = int(high)
-        except ValueError:
-            raise argparse.ArgumentTypeError("range must be numbers")
-        return (low, high)
-    else:
-        # Single number
-        try:
-            val = float(s)
-            # If it's an integer-like float, return as int
-            if val.is_integer():
-                return int(val)
-            return val
-        except ValueError:
-            raise argparse.ArgumentTypeError("must be a number or 'low,high'")
-
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Train a single model on a dataset")
+    print("Running sweep...")
 
-    # Data selection
-    parser.add_argument("--dataset", type=str, default="mazes")
+    # OnceCycleLR
+        # {"name": "OneCycleLR", "kwargs": {"pct_start": 0.15, "anneal_strategy": 'cos', "div_factor": 15}}
+    #LambdaLR
+        # {"name": "LambdaLR", "warmup_epochs": 50, "kwargs": {}}
+    
+    # Define sweep configuration``
+    sweep_config = {
+        "model_types": ["cnn"],
+        "hyperparams": {
+            "lr": [0.005],
+            "num_samples": [345600],
+            "max_epochs": [1200],  
+            "batch_size": [1024],
+            "init_weights": ["none"],
+            "scheduler": [{"name": "OneCycleLR", "kwargs": {"pct_start": 0.15, "anneal_strategy": 'cos', "div_factor": 35}}],
+            "max_gradient": [3]
+        },
+    }
 
-    # Model selection
-    parser.add_argument("--model-type", type=str, default="cnn",
-                        choices=list(BASE_MODEL_CONFIGS.keys()),
-                        help="Model preset to use")
-    parser.add_argument("--model-config-file", type=str, default=None,
-                        help="Path to a JSON file containing the model_config dict. Overrides preset.")
+    # sweep_config = {
+    #     "model_types": ["1e1ii1a"],
+    #     "hyperparams": {
+    #         "lr": [0.0012],
+    #         "num_samples": [345600],
+    #         "num_steps": [20],
+    #         "max_epochs": [2,400],  
+    #         "batch_size": [1024],
+    #         "num_neuron_subtypes": [[8, 4]],
+    #         "fc_dim": [512],
+    #         "out_channels": [8],
+    #         "neuron_type_nonlinearity": ["ReLU"],  
+    #         "inter_neuron_type_nonlinearity": ["ReLU"],
+    #         "inter_neuron_type_spatial_extents": [(5,5)], #[]"center_excitation"], 
+    #         "init_weights": ["none"],
+    #         "scheduler": [{"name": "OneCycleLR", "kwargs": {"pct_start": 0.15, "anneal_strategy": 'cos', "div_factor": 20}}],
+    #         "max_gradient": [5]
+    #     },
+    # }
+    
+    # Run the sweep
+    results = run_sweep(sweep_config)
 
-    # Training hyperparameters
-    parser.add_argument("--lr", type=float, default=0.001)
-    parser.add_argument("--num-samples", type=int, default=100)
-    parser.add_argument("--num-steps", type=int, default=60)
-    parser.add_argument("--max-epochs", type=int, default=10)
-    parser.add_argument("--batch-size", type=int, default=128)
-    parser.add_argument("--max-gradient", type=float, default=None)
-    parser.add_argument("--init-weights", type=str, default="kaiming", choices=["kaiming", "zero", "none"])
-    parser.add_argument("--fc-dim", type=int, default=None, help="Override fully connected layer width for non-CNN models")
-    parser.add_argument("--out-channels", type=int, default=None, help="Override out_channels in area 0 for non-CNN models")
-    parser.add_argument("--num-neuron-subtypes", type=str, default=None, help="Override number of neuron subtypes; either an int or comma-separated list like 8,4")
-    parser.add_argument("--neuron-type-nonlinearity", type=str, default=None, help="Override neuron_type_nonlinearity for area 0")
-    parser.add_argument("--inter-neuron-type-nonlinearity", type=str, default=None, help="Fill the inter-neuron type nonlinearity matrix with a single value (e.g., ReLU)")
-    parser.add_argument("--inter-neuron-type-spatial-extents", type=str, default=None, help='Either a tuple like "5,5" or a keyword: center_excitation | center_inhibition')
-    parser.add_argument("--seed", type=int, default=42)
-
-    # Scheduler options
-    parser.add_argument("--scheduler", type=str, default="none", choices=["none", "onecycle", "lambda"],
-                        help="LR scheduler to use")
-    parser.add_argument("--pct-start", type=float, default=0.15, help="OneCycleLR pct_start")
-    parser.add_argument("--div-factor", type=float, default=25.0, help="OneCycleLR div_factor")
-    parser.add_argument("--warmup-epochs", type=int, default=50, help="LambdaLR warmup epochs")
-
-    # Paths and logging
-    parser.add_argument("--data-root", type=str, default=maze_data_path)
-    parser.add_argument("--checkpoints-dir", type=str, default=checkpoint_path)
-    parser.add_argument("--wandb-project", action="store_true", help="If true, enable Weights & Biases logging to this project")
-
-    # Resume options
-    parser.add_argument("--resume", action="store_true", help="Resume training from a checkpoint")
-    parser.add_argument("--resume-name", type=str, default=None, help="Run name (folder) to resume")
-    parser.add_argument("--resume-epoch", type=int, default=None, help="Epoch checkpoint to resume from")
-
-    # Correlated Dots Args
-    parser.add_argument("--n-frames", type=parse_tuple, default=40)
-    parser.add_argument("--resolution", type=int, default=128)
-    parser.add_argument("--correlation", type=parse_tuple, default=0.5)
-    parser.add_argument("--max-speed", type=parse_tuple, default=1)
-    parser.add_argument("--samples-per-epoch", type=int, default=10000)
-
-    args = parser.parse_args()
-
-    # Build model_config from preset or file
-    if args.model_config_file is not None:
-        with open(args.model_config_file, "r") as f:
-            model_config = json.load(f)
-    else:
-        model_config = copy.deepcopy(BASE_MODEL_CONFIGS[args.model_type])
-
-    # Build scheduler config
-    scheduler_cfg = None
-    if args.scheduler == "onecycle":
-        scheduler_cfg = {"name": "OneCycleLR", "kwargs": {"pct_start": args.pct_start, "anneal_strategy": 'cos', "div_factor": args.div_factor}}
-    elif args.scheduler == "lambda":
-        scheduler_cfg = {"name": "LambdaLR", "warmup_epochs": args.warmup_epochs, "kwargs": {}}
-
-    # Resume if requested
-    if args.resume:
-        if args.resume_name is None or args.resume_epoch is None:
-            raise ValueError("--resume requires --resume-name and --resume-epoch")
-        run_from_checkpoint(
-            wandb_name=args.resume_name,
-            epoch=args.resume_epoch,
-            new_params={
-                "lr": args.lr,
-                "num_steps": args.num_steps,
-                "max_epochs": args.max_epochs,
-                "batch_size": args.batch_size,
-                "max_gradient": args.max_gradient,
-                "scheduler": scheduler_cfg,
-                "init_weights": args.init_weights,
-                "seed": args.seed,
-            },
-            checkpoints_dir=args.checkpoints_dir,
-            data_root=args.data_root,
-            wandb_project=args.wandb_project,
-        )
-    else:
-        # Prepare model overrides from CLI for non-CNN models
-        overrides = {}
-        if args.fc_dim is not None: overrides["fc_dim"] = args.fc_dim
-        if args.out_channels is not None: overrides["out_channels"] = args.out_channels
-        if args.num_neuron_subtypes is not None:
-            try:
-                # Try to parse as int
-                overrides["num_neuron_subtypes"] = int(args.num_neuron_subtypes)
-            except ValueError:
-                overrides["num_neuron_subtypes"] = [int(x) for x in args.num_neuron_subtypes.split(",")]
-        if args.neuron_type_nonlinearity is not None:
-            overrides["neuron_type_nonlinearity"] = args.neuron_type_nonlinearity
-        if args.inter_neuron_type_nonlinearity is not None:
-            overrides["inter_neuron_type_nonlinearity"] = args.inter_neuron_type_nonlinearity
-        if args.inter_neuron_type_spatial_extents is not None:
-            if args.inter_neuron_type_spatial_extents in ("center_excitation", "center_inhibition"):
-                overrides["inter_neuron_type_spatial_extents"] = args.inter_neuron_type_spatial_extents
-            else:
-                h, w = [int(x) for x in args.inter_neuron_type_spatial_extents.split(",")]
-                overrides["inter_neuron_type_spatial_extents"] = (h, w)
-
-        # Apply overrides for non-CNN models
-        effective_model_config = apply_model_overrides(args.model_type, model_config, overrides) if overrides and "cnn" not in args.model_type else model_config
-
-                # Adjust input config based on dataset
-        if args.dataset == "mazes":
-            if "rnn_kwargs" in effective_model_config:
-                for area in effective_model_config["rnn_kwargs"]["area_kwargs"]:
-                    area["in_channels"] = 4
-                    area["in_size"] = (48, 48)
-            else:
-                effective_model_config["in_channels"] = 4  # for CNN presets
-            effective_model_config["num_classes"] = 2
-
-        elif args.dataset == "correlated_dots":
-            if "rnn_kwargs" in effective_model_config:
-                for area in effective_model_config["rnn_kwargs"]["area_kwargs"]:
-                    area["in_channels"] = 1
-                    area["in_size"] = (args.resolution, args.resolution)
-            else:
-                if not isinstance(args.n_frames, int):
-                    raise NotImplementedError("CNN Not Yet Compatible With N_Frames Range")
-                effective_model_config["in_channels"] = args.n_frames
-            effective_model_config["num_classes"] = 8
-
-        dots_kwargs = {}
-        n_frames_range = None
-        if args.dataset == "correlated_dots":
-            if isinstance(args.n_frames, tuple):
-                dots_kwargs["n_frames"] = args.n_frames[1]
-                n_frames_range = args.n_frames
-            else:
-                dots_kwargs["n_frames"] = args.n_frames
-            dots_kwargs["resolution"] = None if args.resolution is None else (args.resolution, args.resolution)
-            dots_kwargs["correlation"] = args.correlation
-            dots_kwargs["max_speed"] = args.max_speed
-            dots_kwargs["samples_per_epoch"] = args.samples_per_epoch
-            args.num_steps = None
-
-        # Train fresh run
-        run_experiment(
-            model_type=args.model_type,
-            model_config=effective_model_config,
-            dataset=args.dataset,
-            lr=args.lr,
-            num_steps=args.num_steps,
-            max_epochs=args.max_epochs,
-            batch_size=args.batch_size,
-            max_gradient=args.max_gradient,
-            scheduler_config=scheduler_cfg,
-            init_weights=args.init_weights,
-            neuron_type_nonlinearity=args.neuron_type_nonlinearity if args.neuron_type_nonlinearity is not None else "relu",
-            data_root=args.data_root,
-            checkpoints_dir=args.checkpoints_dir,
-            wandb_project=args.wandb_project,
-            seed=args.seed,
-            n_frames_range=n_frames_range,
-            dots_kwargs=dots_kwargs
-        )
+    # wandb_name = "confused-haze-455"
+    # new_params = {
+    #     "lr": 0.0008,
+    #     "scheduler": None
+    # }
+    # run_from_checkpoint(wandb_name, 940, new_params=new_params)
+    # wandb_name = "apricot-durian-360"
+    # run_from_checkpoint(wandb_name, 1190)
