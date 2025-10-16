@@ -39,3 +39,8 @@ jupyter.out
 *.png
 *.out
 Corr*
+*.gif
+*.mp4
+*.pkl
+*.pt
+

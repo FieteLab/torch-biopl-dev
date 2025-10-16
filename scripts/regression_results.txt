@@ -1,0 +1,77 @@
+
+=== reachable_path_lengths | shortest_path_lengths ===
+baseline R² = 0.759
+full R²     = 0.761
+ΔR²         = 0.002
+coef        = 0.0019
+pval        = 4.01e-11
+
+=== degrees_in_reachable | shortest_path_lengths ===
+baseline R² = 0.759
+full R²     = 0.761
+ΔR²         = 0.002
+coef        = 0.0006
+pval        = 4.01e-11
+
+=== degrees_in_shortest | shortest_path_lengths ===
+baseline R² = 0.759
+full R²     = 0.761
+ΔR²         = 0.003
+coef        = 0.0752
+pval        = 6.20e-12
+
+=== reachable_from_shortest_lengths | shortest_path_lengths ===
+baseline R² = 0.759
+full R²     = 0.760
+ΔR²         = 0.001
+coef        = 0.0022
+pval        = 8.56e-07
+
+=== degrees_in_reachable_from_shortest | shortest_path_lengths ===
+baseline R² = 0.759
+full R²     = 0.760
+ΔR²         = 0.001
+coef        = 0.0007
+pval        = 8.56e-07
+
+=== degrees_in_reachable | shortest_path_lengths+reachable_path_lengths ===
+baseline R² = 0.761
+full R²     = 0.761
+ΔR²         = 0.000
+coef        = -0.3004
+pval        = 6.88e-168
+
+=== degrees_in_shortest | shortest_path_lengths+shortest_path_lengths ===
+baseline R² = 0.759
+full R²     = 0.761
+ΔR²         = 0.003
+coef        = 0.0752
+pval        = 6.20e-12
+
+=== degrees_in_reachable_from_shortest | shortest_path_lengths+reachable_from_shortest_lengths ===
+baseline R² = 0.760
+full R²     = 0.760
+ΔR²         = -0.000
+coef        = -1236380458.7930
+pval        = 9.07e-01
+
+=== degrees_in_reachable | shortest_path_lengths+reachable_path_lengths+degrees_in_shortest ===
+baseline R² = 0.762
+full R²     = 0.762
+ΔR²         = -0.000
+coef        = -0.3016
+pval        = 5.36e-170
+
+=== degrees_in_shortest | shortest_path_lengths+shortest_path_lengths+degrees_in_shortest ===
+baseline R² = 0.761
+full R²     = 0.761
+ΔR²         = 0.000
+coef        = 0.0376
+pval        = 6.20e-12
+
+=== degrees_in_reachable_from_shortest | shortest_path_lengths+reachable_from_shortest_lengths+degrees_in_shortest ===
+baseline R² = 0.761
+full R²     = 0.761
+ΔR²         = 0.000
+coef        = -0.0226
+pval        = 4.92e-04

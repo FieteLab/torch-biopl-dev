@@ -11,6 +11,7 @@ class Mazes(Dataset):
     def __init__(
         self,
         root,
+        annotation_scaling=3,
         train=True,
         subset=1.0,
         return_metadata=False,
@@ -25,7 +26,7 @@ class Mazes(Dataset):
         self.subset = subset
         self.return_metadata = return_metadata
         self.frame_thickness = 3
-        self.annotation_scaling = 3  # original mazes were labeled on a 144x144 grid, but we want to work on the original 48x48 grid
+        self.annotation_scaling = annotation_scaling  # original mazes were labeled on a 144x144 grid, but we want to work on the original 48x48 grid
         self.cue_size = (
             6 // self.annotation_scaling
         )  # cues are 6x6 pixels in the 144x144 grid (2x2 in the 48x48 grid)

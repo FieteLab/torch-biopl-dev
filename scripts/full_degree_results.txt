@@ -1,0 +1,49 @@
+
+=== reachable_path_lengths | shortest_path_lengths ===
+baseline R² = 0.879
+full R²     = 0.879
+ΔR²         = 0.000
+coef        = 0.0033
+pval        = 1.93e-04
+
+=== degrees_in_reachable | shortest_path_lengths ===
+baseline R² = 0.879
+full R²     = 0.879
+ΔR²         = 0.000
+coef        = 0.0016
+pval        = 1.93e-04
+
+=== degrees_in_shortest | shortest_path_lengths ===
+baseline R² = 0.879
+full R²     = 0.880
+ΔR²         = 0.001
+coef        = 0.0916
+pval        = 4.96e-11
+
+=== degrees_in_reachable | shortest_path_lengths+reachable_path_lengths ===
+baseline R² = 0.879
+full R²     = 0.879
+ΔR²         = 0.000
+coef        = -0.3365
+pval        = 1.68e-140
+
+=== degrees_in_shortest | shortest_path_lengths+shortest_path_lengths ===
+baseline R² = 0.879
+full R²     = 0.880
+ΔR²         = 0.001
+coef        = 0.0916
+pval        = 4.96e-11
+
+=== degrees_in_reachable | shortest_path_lengths+reachable_path_lengths+degrees_in_shortest ===
+baseline R² = 0.880
+full R²     = 0.880
+ΔR²         = 0.000
+coef        = -0.3448
+pval        = 3.65e-146
+
+=== degrees_in_shortest | shortest_path_lengths+shortest_path_lengths+degrees_in_shortest ===
+baseline R² = 0.880
+full R²     = 0.880
+ΔR²         = 0.000
+coef        = 0.0458
+pval        = 4.96e-11
