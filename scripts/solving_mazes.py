@@ -8,15 +8,18 @@ from datetime import datetime
 from functools import partial
 import random
 
-import GPUtil  # type: ignore
+from typing import Optional, Sized
+
 import numpy as np
 import psutil
 import torch
 from torch import nn
+from torch.utils.data import DataLoader as TorchDataLoader, Subset, Dataset as TorchDataset
 from tqdm import tqdm
-import wandb  # type: ignore
+import wandb
 
 from bioplnn.models import SpatiallyEmbeddedClassifier
+from bioplnn.base_model_configs import BASE_MODEL_CONFIGS
 from bioplnn.utils import (
     initialize_dataloader,
     initialize_scheduler,
@@ -34,6 +37,17 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 torch.set_float32_matmul_precision("high")
 
 BATCH_SIZE = 32
+
+def _to_serializable(obj):
+    """Recursively convert objects (e.g., tuples) to JSON/wandb-serializable types."""
+    import numpy as _np
+    if isinstance(obj, dict):
+        return {k: _to_serializable(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_to_serializable(v) for v in obj]
+    if isinstance(obj, _np.ndarray):
+        return obj.tolist()
+    return obj
 
 class DSConv(nn.Module):
     def __init__(self, in_ch, out_ch, stride=1):
@@ -74,17 +88,30 @@ class TinyCNN(nn.Module):
         return self.head(x)    # -> [B, num_classes]
         
 class SimpleCNN(nn.Module):
-    def __init__(self, in_channels=4, num_classes=2, dropout=0.3):
+    def __init__(
+        self,
+        in_channels=4,
+        num_classes=2,
+        dropout=0.3,
+        conv1_out=64,
+        conv2_out=64,
+        conv3_out=128,
+        fc_dim=512,
+        conv_kernel_size=5,
+        pool_kernel=2,
+        pool_stride=2,
+    ):
         super().__init__()
-        self.conv1 = nn.Conv2d(in_channels, 64, kernel_size=5, padding=2)
-        self.conv2 = nn.Conv2d(64, 64, kernel_size=5, padding=2)
-        self.conv3 = nn.Conv2d(64, 128, kernel_size=5, padding=2)
-        self.pool  = nn.MaxPool2d(2, 2)
+        padding = conv_kernel_size // 2 if isinstance(conv_kernel_size, int) else (conv_kernel_size[0] // 2)
+        self.conv1 = nn.Conv2d(in_channels, conv1_out, kernel_size=conv_kernel_size, padding=padding)
+        self.conv2 = nn.Conv2d(conv1_out, conv2_out, kernel_size=conv_kernel_size, padding=padding)
+        self.conv3 = nn.Conv2d(conv2_out, conv3_out, kernel_size=conv_kernel_size, padding=padding)
+        self.pool  = nn.MaxPool2d(pool_kernel, pool_stride)
         self.relu  = nn.ReLU(inplace=True)
         self.dropout = nn.Dropout(dropout)
-        self.gap   = nn.AdaptiveAvgPool2d(1)     # <- NEW
-        self.fc1   = nn.Linear(128, 512)          # <- 64 channels only
-        self.fc2   = nn.Linear(512, num_classes)
+        self.gap   = nn.AdaptiveAvgPool2d(1)
+        self.fc1   = nn.Linear(conv3_out, fc_dim)
+        self.fc2   = nn.Linear(fc_dim, num_classes)
 
     def forward(self, x):
         x = self.pool(self.relu(self.conv1(x)))
@@ -148,16 +175,59 @@ def get_cpu_memory():
     process = psutil.Process(os.getpid())
     return process.memory_info().rss / 1024**2
 
-def get_gpu_utilization():
-    """Get current GPU utilization percentage."""
-    if torch.cuda.is_available() and GPUtil is not None:
-        try:
-            gpus = GPUtil.getGPUs()
-            if gpus:
-                return gpus[0].load * 100
-        except:
-            pass
-    return 0
+
+def _limit_loader_samples(
+    loader,
+    num_samples: Optional[int],
+    seed: Optional[int],
+    shuffle: bool,
+):
+    if loader is None or num_samples is None:
+        return loader
+
+    dataset = getattr(loader, "dataset", None)
+    if dataset is None or not isinstance(dataset, TorchDataset):
+        return loader
+
+    try:
+        total = len(dataset)  # type: ignore
+    except TypeError:
+        return loader
+
+    target = int(num_samples)
+    if target <= 0 or target >= total:
+        return loader
+
+    rng = random.Random(seed)
+    indices = rng.sample(range(total), k=target)
+    subset = Subset(dataset, indices)
+
+    return TorchDataLoader(
+        subset,
+        batch_size=loader.batch_size,
+        shuffle=shuffle,
+        num_workers=loader.num_workers,
+        pin_memory=loader.pin_memory,
+        drop_last=loader.drop_last,
+        worker_init_fn=loader.worker_init_fn,
+        generator=loader.generator,
+        collate_fn=loader.collate_fn,
+        persistent_workers=getattr(loader, "persistent_workers", False),
+    )
+
+
+def _apply_num_sample_limit(
+    train_loader,
+    val_loader,
+    num_samples: Optional[int],
+    seed: Optional[int],
+):
+    if num_samples is None:
+        return train_loader, val_loader
+
+    train_loader = _limit_loader_samples(train_loader, num_samples, seed, shuffle=True)
+    val_loader = _limit_loader_samples(val_loader, num_samples, seed, shuffle=False)
+    return train_loader, val_loader
 
 def init_weights_kaiming(m, nonlinearity="relu"):
     if isinstance(m, nn.Conv2d) or isinstance(m, nn.Linear):
@@ -192,56 +262,10 @@ def get_gradient_norm(model):
             total_norm += param_norm.item() ** 2
     return total_norm ** 0.5
 
-def analyze_logits(logits, labels, num_samples=5, detailed=False):
-    """Analyze logits distribution and predictions."""
-    probs = torch.softmax(logits, dim=1)
-    _, predicted = torch.max(logits, 1)
-    
-    # Get random samples
-    indices = torch.randperm(len(logits))[:num_samples]
-    
-    print("\nLogits Analysis:")
-    print("=" * 50)
-    for idx in indices:
-        print(f"Sample {idx}:")
-        print(f"True label: {labels[idx].item()}")
-        print(f"Predicted: {predicted[idx].item()}")
-        print(f"Logits: {logits[idx].detach().cpu().numpy()}")
-        print(f"Probabilities: {probs[idx].detach().cpu().numpy()}")
-        print("-" * 30)
-    
-    if detailed:
-        # Additional statistics
-        logits_np = logits.detach().cpu().numpy()
-        probs_np = probs.detach().cpu().numpy()
-        print("\nDetailed Statistics:")
-        print(f"Logits mean: {logits_np.mean():.4f}, std: {logits_np.std():.4f}")
-        print(f"Logits min: {logits_np.min():.4f}, max: {logits_np.max():.4f}")
-        print(f"Probabilities mean: {probs_np.mean():.4f}, std: {probs_np.std():.4f}")
-        print(f"Probabilities min: {probs_np.min():.4f}, max: {probs_np.max():.4f}")
-        
-        # Distribution of predictions
-        unique, counts = np.unique(predicted.cpu().numpy(), return_counts=True)
-        pred_dist = dict(zip(unique, counts))
-        print(f"Prediction distribution: {pred_dist}")
-
-def train(model, model_type, train_loader, test_loader, criterion, optimizer, scheduler, num_steps, max_epochs, max_gradient, train_log_frequency, run_name, run, n_frames_range=None, start_epoch=0, checkpoint_dir=checkpoint_path):
+def train(model, model_type, train_loader, test_loader, criterion, optimizer, scheduler, num_steps, max_epochs, max_gradient, train_log_frequency, run_name, run, n_frames_range=None, start_epoch=0, checkpoint_dir=checkpoint_path, loss_all_timesteps=False):
     # Define the training loop
+    print(num_steps)
     model.train()
-
-    # # Print initial diagnostics
-    # print("\nInitial Dataset Analysis:")
-    # print("=" * 50)
-    # train_dist = get_class_distribution(train_loader)
-    # test_dist = get_class_distribution(test_loader)
-    # print(f"Training set class distribution: {train_dist.numpy()}")
-    # print(f"Test set class distribution: {test_dist.numpy()}")
-    # print("=" * 50)
-
-    gpu_memory = get_gpu_memory()
-    cpu_memory = get_cpu_memory()
-    gpu_util = get_gpu_utilization()
-    print(f"GPU Memory: {gpu_memory:.1f}MB | CPU Memory: {cpu_memory:.1f}MB | GPU Utilization: {gpu_util:.1f}%")
 
     val_accs = []
     patience = 200
@@ -254,32 +278,44 @@ def train(model, model_type, train_loader, test_loader, criterion, optimizer, sc
             run.config.update({"n_epochs": epoch}, allow_val_change=True)
         running_loss, running_correct, running_total = 0, 0, 0
         for i, (x, labels) in enumerate(tqdm(train_loader)):
-            try:
-                x = x.to(device)
-            except AttributeError:
-                x = [t.to(device) for t in x]
+            x = x.to(device)
             labels = labels.to(device)
+
+            if i == 0:
+                print("x.shape")
+                print(x.shape)
+                print("labels.shape")
+                print(labels.shape)
 
             if n_frames_range is not None and num_steps is None:
                 n_frames = random.randint(n_frames_range[0], n_frames_range[1])
                 x = x[:, :n_frames]
             
-            print(x.shape)
-            
+            if i == 0:
+                print("x.shape")
+                print(x.shape)
+                
             # Forward pass
             if "cnn" in model_type:
                 if len(x.shape) == 5:
                     x = x[:, :, 0, :, :]
                 logits = model(x)
             else:
-                logits = model(x, num_steps=num_steps, loss_all_timesteps=False)
+                logits = model(x, num_steps=num_steps, loss_all_timesteps=loss_all_timesteps)
 
             if labels.ndim == 2 and labels.size(1) == 1:
                 labels = labels.squeeze(1)       # [N, 1] -> [N]
             elif labels.ndim != 1:
                 raise ValueError(f"Expected labels shape [N] or [N,1], got {tuple(labels.shape)}")
 
-            loss = criterion(logits, labels)
+            if loss_all_timesteps:
+                # logits: [B, T, C]
+                B, T, C = logits.shape
+                logits_ce = logits.transpose(1, 2)
+                targets = labels.unsqueeze(1).expand(-1, T)      # [B, T]
+                loss = criterion(logits_ce, targets)
+            else:
+                loss = criterion(logits, labels)
             
             # Backward pass
             optimizer.zero_grad()
@@ -297,7 +333,10 @@ def train(model, model_type, train_loader, test_loader, criterion, optimizer, sc
                 scheduler.step()
 
             # Calculate batch metrics
-            predicted = torch.argmax(logits, 1)
+            if loss_all_timesteps:
+                predicted = torch.argmax(logits[:, -1, :], 1)
+            else:
+                predicted = torch.argmax(logits, 1)
             batch_total = labels.size(0)
             batch_correct = (predicted == labels).sum().item()
             batch_loss = loss.item()
@@ -308,26 +347,21 @@ def train(model, model_type, train_loader, test_loader, criterion, optimizer, sc
             running_loss += batch_loss * batch_total  # Weight loss by batch size
 
             # Log batch metrics if needed
-            if i % train_log_frequency == 0:
+            if (i+1) % train_log_frequency == 0:
                 batch_acc = batch_correct / batch_total
                 print(
-                    f"Batch {i} | "
+                    f"Batch {i+1} of {len(train_loader)} | "
                     + f"Loss: {batch_loss:.4f} | "
                     + f"Acc: {batch_acc:.2%} | "
                     + f"Grad Norm: {grad_norm:.4f} | "
                     + f"LR: {optimizer.param_groups[0]['lr']:.2e}"
                 )
-                
-                # Analyze logits every train_log_frequency batches
-                # Use detailed analysis for first few batches
-                # analyze_logits(logits, labels, detailed=(i < 3))
-
-                if run is not None:
+                if run is not None: 
                     wandb.log({
                         "train_loss": running_loss / running_total,
                         "train_acc": running_correct / running_total,
                         "gradient_norm": grad_norm,
-                        "step": epoch * len(train_loader) + i,
+                        "step": epoch * len(train_loader) + i + 1,
                         "lr": optimizer.param_groups[0]["lr"]
                     })
             
@@ -381,6 +415,15 @@ def train(model, model_type, train_loader, test_loader, criterion, optimizer, sc
                 }
                 torch.save(checkpoint, f"{save_path}/{epoch}.pth")
                 break
+    
+    print(f"Saving final checkpoint to {save_path}/{epoch}.pth")
+    checkpoint = {
+        'epoch': epoch,
+        'model_state': model.module.state_dict() if isinstance(model, nn.DataParallel) else model.state_dict(),
+        'opt_state': optimizer.state_dict(),
+        'sched_state': scheduler.state_dict() if scheduler else None,
+    }
+    torch.save(checkpoint, f"{save_path}/{epoch}.pth")
 
 def get_scheduler(scheduler_config, optimizer=None, train_loader=None, max_epochs=None, lr=None):
     if scheduler_config is None:
@@ -408,25 +451,59 @@ def get_scheduler(scheduler_config, optimizer=None, train_loader=None, max_epoch
         **kwargs)
     return scheduler
 
+def extract_true_model_config(model, model_type):
+    """Extract the instantiated model's effective configuration."""
+    base_model = model.module if isinstance(model, nn.DataParallel) else model
+
+    if not "cnn" in model_type:
+        return base_model.get_config()
+    elif model_type == "cnn":
+        m = base_model
+        return {
+            "in_channels": int(m.conv1.in_channels),
+            "num_classes": int(m.fc2.out_features),
+            "dropout": float(m.dropout.p),
+            "conv1_out": int(m.conv1.out_channels),
+            "conv2_out": int(m.conv2.out_channels),
+            "conv3_out": int(m.conv3.out_channels),
+            "fc_dim": int(m.fc1.out_features),
+            "conv_kernel_size": int(m.conv1.kernel_size[0]),
+            "pool_kernel": int(m.pool.kernel_size),
+            "pool_stride": int(m.pool.stride),
+        }
+    elif model_type == "tiny_cnn":
+        m = base_model
+        return {
+            "in_channels": int(m.stem[0].in_channels),
+            "num_classes": int(m.head[-1].out_features),
+            "dropout": float(m.head[1].p),
+        }
+    else:
+        raise ValueError(f"Model type {model_type} not supported")
 
 def run_experiment(
     model_type,
     model_config,
     dataset="mazes",
     lr=0.001,
-    num_steps=60,
+    num_steps: "int | None" = 60,
     max_epochs=10,
     batch_size=128,
     max_gradient=None,
     scheduler_config=None,
     init_weights="kaiming",
     neuron_type_nonlinearity="relu",
-    data_root=maze_data_path,
+    data_root: Optional[str] = maze_data_path,
     checkpoints_dir=checkpoint_path,
     wandb_project=False,
     seed=42,
     n_frames_range=None,
-    dots_kwargs = {}
+    dots_kwargs = {},
+    num_samples: "int | None" = None,
+    resolution: Optional[int] = None,
+    extra_config: Optional[dict] = None,
+    loss_all_timesteps=False,
+    output_area_index=None,
 ):
     """Run a single experiment with the given model type, config and hyperparameters."""
     manual_seed(seed)
@@ -449,15 +526,52 @@ def run_experiment(
     criterion = nn.CrossEntropyLoss()
 
     if dataset == "mazes" or dataset == "cabc":
-        train_loader, test_loader = load_data(dataset, batch_size=batch_size, root=data_root)
+        print(dataset)
+        print(resolution)
+        train_loader, test_loader = load_data(
+            dataset,
+            batch_size=batch_size,
+            root=data_root,
+            resolution=None if resolution is None else (resolution, resolution),
+        )
     elif dataset == "correlated_dots":
         train_loader, test_loader = load_data(dataset, batch_size=batch_size, **dots_kwargs)
+    else:
+        train_loader, test_loader = load_data(
+            dataset,
+            batch_size=batch_size,
+            root=data_root,
+            resolution=None if resolution is None else (resolution, resolution),
+        )
+
+    if dataset != "correlated_dots":
+        train_loader, test_loader = _apply_num_sample_limit(train_loader, test_loader, num_samples, seed)
 
     train_log_frequency = max(1, len(train_loader) // 10)
         
+    if init_weights == "kaiming":
+        model.apply(partial(init_weights_kaiming, nonlinearity=neuron_type_nonlinearity))
+    elif init_weights == "zero":
+        model.apply(init_weights_zero)
+    
+    scheduler = get_scheduler(scheduler_config, optimizer=optimizer, train_loader=train_loader, max_epochs=max_epochs, lr=lr) if scheduler_config else None
+
+    # Build the true config from the instantiated model
+    true_model_config = extract_true_model_config(model, model_type)
+    # Determine effective sample counts for logging/config safely
+    train_ds = getattr(train_loader, "dataset", None)
+    effective_train_samples = (
+        len(train_ds) if isinstance(train_ds, Sized) else None
+    )
+    effective_val_samples = None
+    if test_loader is not None:
+        val_ds = getattr(test_loader, "dataset", None)
+        if isinstance(val_ds, Sized):
+            effective_val_samples = len(val_ds)
+
     full_config = {
         "model_type": model_type,
-        "model_config": model_config,
+        "model_config": true_model_config,
         "lr": lr,
         "num_steps": num_steps,
         "max_epochs": max_epochs,
@@ -466,15 +580,21 @@ def run_experiment(
         "scheduler": scheduler_config,
         "init_weights": init_weights,
         "seed": seed,
-        "dots_kwargs": dots_kwargs
+        "dots_kwargs": dots_kwargs,
+        "dataset": dataset,
+        "loss_all_timesteps": loss_all_timesteps,
     }
+    if extra_config is not None:
+        # Flatten all CLI args into the top-level config
+        _flat = _to_serializable(extra_config)
+        if isinstance(_flat, dict):
+            for _k, _v in _flat.items():
+                full_config[_k] = _v
+    if resolution is not None:
+        full_config["resolution"] = int(resolution)
 
-    if init_weights == "kaiming":
-        model.apply(partial(init_weights_kaiming, nonlinearity=neuron_type_nonlinearity))
-    elif init_weights == "zero":
-        model.apply(init_weights_zero)
-    
-    scheduler = get_scheduler(scheduler_config, optimizer=optimizer, train_loader=train_loader, max_epochs=max_epochs, lr=lr) if scheduler_config else None
+    if num_samples is not None:
+        full_config["num_samples"] = int(num_samples)
 
     # Logging
     run = None
@@ -508,6 +628,7 @@ def run_experiment(
         n_frames_range=n_frames_range,
         start_epoch=0,
         checkpoint_dir=checkpoints_dir,
+        loss_all_timesteps=loss_all_timesteps,
     )
     
     # Evaluate final performance
@@ -520,281 +641,90 @@ def run_experiment(
         wandb.finish()
     
     return final_val_loss, final_val_acc
-
-BASE_MODEL_CONFIGS = {
-            "1e1i1a": {
-                "rnn_kwargs": {
-                    "num_areas": 1,
-                    "area_kwargs": [
-                        {
-                            "num_neuron_types": 2,
-                            "num_neuron_subtypes": np.array([32, 8]),
-                            "neuron_type_class": np.array(["excitatory", "inhibitory"]),
-                            "inter_neuron_type_connectivity": np.array(
-                                [[1, 1, 0], [1, 1, 1], [1, 0, 0]]
-                            ),
-                            "in_size": [48, 48],
-                            "in_channels": 4,
-                            "out_channels": 32,
-                            "inter_neuron_type_nonlinearity": np.array([[None, None, None], [None, None, None], [None, None, None]]),
-                            "inter_neuron_type_spatial_extents": (5,5),
-                        },
-                    ],
-                },
-                "num_classes": 2,
-                "fc_dim": 512,
-                "dropout": 0.2,
-            },
-            "1e1ii1ef1a": {
-                "rnn_kwargs": {
-                    "num_areas": 2,
-                    "area_kwargs": [
-                        {
-                            "num_neuron_types": 2,
-                            "num_neuron_subtypes": np.array([8, 4]),
-                            "neuron_type_class": np.array(["excitatory", "inhibitory"]),
-                            "inter_neuron_type_connectivity": np.array(
-                                [[1, 1, 0], [1, 0, 0], [1, 1, 1], [1, 0, 1]]
-                            ),
-                            "in_size": [48, 48],
-                            "feedback_channels": 8,
-                            "in_channels": 4,
-                            "out_channels": 8,
-                            "inter_neuron_type_nonlinearity": np.array([[None, None, None], [None, None, None], [None, None, None], [None, None, None]]),
-                            "inter_neuron_type_spatial_extents": (5,5),
-                        },
-                        {
-                            "num_neuron_types": 1,
-                            "num_neuron_subtypes": np.array([8]),
-                            "neuron_type_class": np.array(["excitatory"]),
-                            "inter_neuron_type_connectivity": np.array(
-                                [[1, 0], [1, 1]]
-                            ),
-                            "in_size": [48, 48],
-                            "in_channels": 8,
-                            "out_channels": 8,
-                            "inter_neuron_type_nonlinearity": np.array([[None, None], [None, None]]),
-                            "inter_neuron_type_spatial_extents": (7,7),
-                        },
-                    ],
-                    "inter_area_feedback_connectivity": np.array([[0, 0],[1, 0]])
-                },
-                "num_classes": 2,
-                "fc_dim": 512,
-                "dropout": 0.2,
-            },
-            "1e1ii1a": {
-                "rnn_kwargs": {
-                    "num_areas": 1,
-                    "area_kwargs": [
-                        {
-                            "in_class": "excitatory"
-                            "neuron_type_nonlinearity": "ReLU",
-                            "out_nonlinearity": "ReLU",
-                            "num_neuron_types": 2,
-                            "num_neuron_subtypes": np.array([32, 8]),
-                            "neuron_type_class": np.array(["excitatory", "inhibitory"]),
-                            "inter_neuron_type_connectivity": np.array(
-                                [[1, 1, 0], [1, 1, 1], [1, 1, 0]]
-                            ),
-                            "in_size": [48, 48],
-                            "in_channels": 4,
-                            "out_channels": 32,
-                            "inter_neuron_type_nonlinearity": np.array([[None, None, None], [None, None, None], [None, None, None]]),
-                            "inter_neuron_type_spatial_extents": (5,5),
-                        },
-                    ],
-                },
-                "num_classes": 2,
-                "fc_dim": 512,
-                "dropout": 0.2,
-            },
-            "hybrid": {
-                "rnn_kwargs": {
-                    "num_areas": 1,
-                    "area_kwargs": [
-                        {
-                            "num_neuron_types": 1,
-                            "num_neuron_subtypes": np.array([64]),
-                            "neuron_type_class": np.array(["hybrid"]),
-                            "inter_neuron_type_connectivity": np.array(
-                                [[1, 0], [1, 1]]
-                            ),
-                            "in_size": [48, 48],
-                            "in_channels": 4,
-                            "out_channels": 16,
-                            "inter_neuron_type_nonlinearity": np.array([["relu", "relu"], ["relu", "relu"]]),
-                            "inter_neuron_type_spatial_extents": (3, 3)
-                        },
-                    ],
-                },
-                "num_classes": 2,
-                "fc_dim": 64,
-                "dropout": 0.1,
-            },
-            "1h1a": {
-                "rnn_kwargs": {
-                    "num_areas": 1,
-                    "area_kwargs": [
-                        {
-                            "num_neuron_types": 1,
-                            "num_neuron_subtypes": np.array([16]),
-                            "neuron_type_class": np.array(["hybrid"]),
-                            "inter_neuron_type_connectivity": np.array(
-                                [[1, 0], [1, 1]]
-                            ),
-                            "in_size": [48, 48],
-                            "in_channels": 4,
-                            "out_channels": 32,
-                            "inter_neuron_type_nonlinearity": np.array([["sigmoid", "sigmoid"], ["sigmoid", "sigmoid"]]),
-                            "inter_neuron_type_spatial_extents": (3, 3)
-                        },
-                    ],
-                },
-                "num_classes": 2,
-                "fc_dim": 64,
-                "dropout": 0.2,
-            },
-            "hybrid_ei": {
-                "rnn_kwargs": {
-                    "num_areas": 1,
-                    "area_kwargs": [
-                        {
-                            "num_neuron_types": 2,
-                            "num_neuron_subtypes": np.array([64, 64]),
-                            "neuron_type_class": np.array(["hybrid", "hybrid"]),
-                            "inter_neuron_type_connectivity": np.array(
-                                [[1, 1, 0], [1, 1, 1], [1, 1, 0]]
-                            ),
-                            "in_size": [48, 48],
-                            "in_channels": 4,
-                            "out_channels": 16,
-                            "inter_neuron_type_nonlinearity": np.array([["relu", "relu", "relu"], ["relu", "relu", "relu"], ["relu", "relu", "relu"]]),
-                            "inter_neuron_type_spatial_extents": (3, 3)
-                        },
-                    ],
-                },
-                "num_classes": 2,
-                "fc_dim": 64,
-                "dropout": 0.1,
-            },
-            "bio_cnn_hybrid": {
-                "rnn_kwargs": {
-                    "num_areas": 2,
-                    "area_kwargs": [
-                        {
-                            "num_neuron_types": 1,
-                            "num_neuron_subtypes": np.array([64]),
-                            "neuron_type_class": np.array(["hybrid"]),
-                            "inter_neuron_type_connectivity": np.array(
-                                [[1, 0], [0, 1]]
-                            ),
-                            "in_size": [48, 48],
-                            "in_channels": 4,
-                            "out_channels": 128,
-                            "inter_neuron_type_nonlinearity": np.array([["relu", "relu"], ["relu", "relu"]]),
-                            "inter_neuron_type_spatial_extents": (5, 5)
-                        },
-                        {
-                            "num_neuron_types": 1,
-                            "num_neuron_subtypes": np.array([256]),
-                            "neuron_type_class": np.array(["hybrid"]),
-                            "inter_neuron_type_connectivity": np.array(
-                                [[1, 0], [0, 1]]
-                            ),
-                            "in_size": [48, 48],
-                            "in_channels": 128,
-                            "out_channels": 256,
-                            "inter_neuron_type_nonlinearity": np.array([["relu", "relu"], ["relu", "relu"]]),
-                            "inter_neuron_type_spatial_extents": (5, 5)
-                        },
-                    ],
-                },
-                "num_classes": 2,
-                "fc_dim": 512,
-                "dropout": 0.1,
-            },
-            "cnn": {
-                "in_channels": 4,
-                "num_classes": 2,
-                "dropout": 0.35,
-            },
-            "tiny_cnn": {
-                "in_channels": 4,
-                "num_classes": 2,
-                "dropout": 0.1,
-            }
-        }
-
+    
 def apply_model_overrides(model_type: str, model_config: dict, overrides: dict) -> dict:
     cfg = copy.deepcopy(model_config)
     if "cnn" in model_type:
-        # Currently only common overrides apply to non-CNN models
         return cfg
 
     # fc_dim override
     fc_dim = overrides.get("fc_dim")
     if fc_dim is not None:
         cfg["fc_dim"] = fc_dim
+    
+    output_area_index = overrides.get("output_area_index")
+    if output_area_index is not None:
+        cfg["output_area_index"] = output_area_index
 
-    area0 = cfg.get("rnn_kwargs", {}).get("area_kwargs", [{}])[0]
-    if not area0:
+    areas = cfg.get("rnn_kwargs", {}).get("area_kwargs", [])
+    if not areas:
         return cfg
 
-    # out_channels override
-    out_channels = overrides.get("out_channels")
-    if out_channels is not None:
-        area0["out_channels"] = out_channels
+    # Apply per-area overrides uniformly
+    out_channels_override = overrides.get("out_channels")
+    nnst_override = overrides.get("num_neuron_subtypes")
+    inter_conn_override = overrides.get("inter_neuron_type_connectivity")
+    spatial_extents_override = overrides.get("inter_neuron_type_spatial_extents")
+    inter_nt_nl_override = overrides.get("inter_neuron_type_nonlinearity")
+    nt_nl_override = overrides.get("neuron_type_nonlinearity")
 
-    # num_neuron_subtypes override (int or list)
-    nnst = overrides.get("num_neuron_subtypes")
-    if nnst is not None:
-        num_types = area0.get("num_neuron_types", None)
-        if isinstance(nnst, int):
-            if num_types is None:
-                raise ValueError("num_neuron_types missing in base config while applying num_neuron_subtypes=int")
-            area0["num_neuron_subtypes"] = np.ones(int(num_types), dtype=int) * int(nnst)
-        elif isinstance(nnst, (list, tuple, np.ndarray)):
-            area0["num_neuron_subtypes"] = np.array(list(map(int, nnst)))
+    for idx, area in enumerate(areas):
+        if out_channels_override is not None:
+            area["out_channels"] = out_channels_override
 
-    # inter_neuron_type_connectivity - not exposed via CLI in example, keep for completeness
-    if "inter_neuron_type_connectivity" in overrides and overrides["inter_neuron_type_connectivity"] is not None:
-        area0["inter_neuron_type_connectivity"] = np.array(overrides["inter_neuron_type_connectivity"])
+        if nnst_override is not None:
+            num_types = area.get("num_neuron_types", None)
+            if isinstance(nnst_override, int):
+                if num_types is None:
+                    raise ValueError("num_neuron_types missing in base config while applying num_neuron_subtypes=int")
+                area["num_neuron_subtypes"] = np.ones(int(num_types), dtype=int) * int(nnst_override)
+            elif isinstance(nnst_override, (list, tuple, np.ndarray)):
+                area["num_neuron_subtypes"] = np.array(list(map(int, nnst_override)))
 
-    # inter_neuron_type_spatial_extents
-    spatial_extents = overrides.get("inter_neuron_type_spatial_extents")
-    if spatial_extents is not None:
-        if isinstance(spatial_extents, str):
-            if spatial_extents == "center_excitation":
-                area0["inter_neuron_type_spatial_extents"] = np.array([[(5,5), (5,5), (5,5)], [(3,3), (3,3), (3,3)], [(7,7), (7,7), (7,7)]])
-            elif spatial_extents == "center_inhibition":
-                area0["inter_neuron_type_spatial_extents"] = np.array([[(5,5), (5,5), (5,5)], [(5,5), (5,5), (5,5)], [(3,3), (5,5), (5,5)]])
-    else:
-            # expects tuple like (h, w)
-            area0["inter_neuron_type_spatial_extents"] = spatial_extents
+        if inter_conn_override is not None:
+            area["inter_neuron_type_connectivity"] = np.array(inter_conn_override)
 
-    # inter_neuron_type_nonlinearity (single token to fill matrix)
-    inter_nt_nl = overrides.get("inter_neuron_type_nonlinearity")
-    if inter_nt_nl is not None:
-        connectivity = area0.get("inter_neuron_type_connectivity")
-        if connectivity is None:
-            raise ValueError("inter_neuron_type_connectivity missing; cannot derive matrix shape for nonlinearity")
-        rows, cols = connectivity.shape
-        area0["inter_neuron_type_nonlinearity"] = np.full((rows, cols), inter_nt_nl)
+        if spatial_extents_override is not None:
+            if isinstance(spatial_extents_override, str):
+                if spatial_extents_override == "center_excitation":
+                    area["inter_neuron_type_spatial_extents"] = np.array([[(5,5), (5,5), (5,5)], [(3,3), (3,3), (3,3)], [(7,7), (7,7), (7,7)]])
+                elif spatial_extents_override == "center_inhibition":
+                    area["inter_neuron_type_spatial_extents"] = np.array([[(5,5), (5,5), (5,5)], [(5,5), (5,5), (5,5)], [(3,3), (5,5), (5,5)]])
+            else:
+                area["inter_neuron_type_spatial_extents"] = spatial_extents_override
 
-    # neuron_type_nonlinearity (per-type nonlinearity)
-    nt_nl = overrides.get("neuron_type_nonlinearity")
-    if nt_nl is not None:
-        area0["neuron_type_nonlinearity"] = nt_nl
+        if inter_nt_nl_override is not None:
+            connectivity = area.get("inter_neuron_type_connectivity")
+            if connectivity is None:
+                raise ValueError("inter_neuron_type_connectivity missing; cannot derive matrix shape for nonlinearity")
+            rows, cols = connectivity.shape
+            area["inter_neuron_type_nonlinearity"] = np.full((rows, cols), inter_nt_nl_override)
 
-    # Write back area0
-    cfg["rnn_kwargs"]["area_kwargs"][0] = area0
+        if nt_nl_override is not None:
+            area["neuron_type_nonlinearity"] = nt_nl_override
+
+    # Ensure channel chaining across areas
+    for i in range(1, len(areas)):
+        prev_out = areas[i-1].get("out_channels")
+        if prev_out is not None:
+            areas[i]["in_channels"] = prev_out
+
+    cfg["rnn_kwargs"]["area_kwargs"] = areas
     return cfg
 
-def run_from_checkpoint(wandb_name, epoch, new_params={}, checkpoints_dir=checkpoint_path, data_root=maze_data_path, wandb_project=False):
+def run_from_checkpoint(wandb_name, epoch, new_params={}, checkpoints_dir=checkpoint_path, data_root: Optional[str] = maze_data_path, wandb_project=False, cli_args: Optional[dict] = None):
     full_config = pickle.load(open(os.path.join(checkpoints_dir, f"{wandb_name}.pkl"), "rb"))
     for param, value in new_params.items():
         full_config[param] = value
+    if cli_args is not None:
+        # Flatten CLI args into the top-level config
+        _flat_cli = _to_serializable(cli_args)
+        if isinstance(_flat_cli, dict):
+            for _k, _v in _flat_cli.items():
+                full_config[_k] = _v
+
+    num_samples = full_config.get("num_samples", None)
+    seed_value = full_config.get("seed", None)
 
     model_config = full_config["model_config"]
     model_type = full_config.get("model_type", "1e1i1a")  # Default to bioplnn if not specified
@@ -811,25 +741,7 @@ def run_from_checkpoint(wandb_name, epoch, new_params={}, checkpoints_dir=checkp
     if torch.cuda.device_count() > 1:
         print(f"Using {torch.cuda.device_count()} GPUs")
         model = nn.DataParallel(model)
-    
-    # # Load checkpoint
-    # checkpoint = torch.load(checkpoint_path + f"{wandb_name}/{epoch}.pth")
-    
-    # # Handle both old format (just state_dict) and new format (full checkpoint)
-    # if isinstance(checkpoint, dict) and 'model_state' in checkpoint:
-    #     # New format - full checkpoint
-    #     model.load_state_dict(checkpoint['model_state'])
-    #     start_epoch = checkpoint['epoch'] + 1
-    #     print(f"Resuming from epoch {checkpoint['epoch']}, will start at epoch {start_epoch}")
-    # else:
-    #     # Old format - just state dict
-    #     model.load_state_dict(checkpoint)
-    #     start_epoch = epoch + 1
-    #     print(f"Loaded old format checkpoint from epoch {epoch}, will start at epoch {start_epoch}")
-    
-    # --- after you instantiate model (and wrap for multi-GPU if you do that) ---
-    ckpt = torch.load(os.path.join(checkpoints_dir, wandb_name, f"{epoch}.pth"),
-                    map_location=device)  # keep weights_only=False for full ckpt dict
+        ckpt = torch.load(os.path.join(checkpoints_dir, wandb_name, f"{epoch}.pth"), map_location=device)
 
     state = ckpt["model_state"]
     start_epoch = ckpt['epoch'] + 1
@@ -873,7 +785,26 @@ def run_from_checkpoint(wandb_name, epoch, new_params={}, checkpoints_dir=checkp
     # Define the loss function
     criterion = nn.CrossEntropyLoss()
 
-    train_loader, test_loader = load_data(batch_size=batch_size, root=data_root)
+    # use dataset from saved config if present
+    dataset = full_config.get("dataset", "mazes")
+    if dataset == "correlated_dots":
+        dots_kwargs = copy.deepcopy(full_config.get("dots_kwargs", {}))
+        if num_samples is not None:
+            dots_kwargs["samples_per_epoch"] = num_samples
+        train_loader, test_loader = load_data(dataset, batch_size=batch_size, root=data_root, **dots_kwargs)
+        full_config["dots_kwargs"] = dots_kwargs
+    else:
+        train_loader, test_loader = load_data(
+            dataset,
+            batch_size=batch_size,
+            root=data_root,
+        )
+        train_loader, test_loader = _apply_num_sample_limit(
+            train_loader,
+            test_loader,
+            num_samples,
+            seed_value,
+        )
 
     train_log_frequency = max(1, len(train_loader) // 10)  # How often to log training metrics
     
@@ -890,7 +821,11 @@ def run_from_checkpoint(wandb_name, epoch, new_params={}, checkpoints_dir=checkp
     torch.cuda.empty_cache()
     
     run = None
-    if wandb_projec:
+    if wandb_project:
+        # Recompute true model config from the instantiated model
+        true_model_config = extract_true_model_config(model, model_type)
+        full_config["model_config"] = true_model_config
+
         run = wandb.init(
             project=dataset,
             config=full_config,
@@ -939,6 +874,187 @@ def parse_tuple(s):
         except ValueError:
             raise argparse.ArgumentTypeError("must be a number or 'low,high'")
 
+def _select_data_root(dataset: str):
+    if dataset == "mazes":
+        return maze_data_path
+    if dataset == "cabc":
+        return cabc_data_path
+    return None
+
+def _load_model_config(args):
+    if args.model_config_file is not None:
+        with open(args.model_config_file, "r") as f:
+            return json.load(f)
+    return copy.deepcopy(BASE_MODEL_CONFIGS[args.model_type])
+
+def _build_scheduler_cfg(args):
+    if args.scheduler == "onecycle":
+        return {
+            "name": "OneCycleLR",
+            "kwargs": {
+                "pct_start": args.pct_start,
+                "anneal_strategy": "cos",
+                "div_factor": args.div_factor,
+            },
+        }
+    if args.scheduler == "lambda":
+        return {
+            "name": "LambdaLR",
+            "warmup_epochs": args.warmup_epochs,
+            "kwargs": {},
+        }
+    return None
+
+def _collect_non_cnn_overrides(args):
+    overrides = {}
+    if args.fc_dim is not None:
+        overrides["fc_dim"] = args.fc_dim
+    if args.out_channels is not None:
+        overrides["out_channels"] = args.out_channels
+    if args.num_neuron_subtypes is not None:
+        try:
+            overrides["num_neuron_subtypes"] = int(args.num_neuron_subtypes)
+        except ValueError:
+            overrides["num_neuron_subtypes"] = [int(x) for x in args.num_neuron_subtypes.split(",")]
+    if args.neuron_type_nonlinearity is not None:
+        overrides["neuron_type_nonlinearity"] = args.neuron_type_nonlinearity
+    if args.inter_neuron_type_nonlinearity is not None:
+        overrides["inter_neuron_type_nonlinearity"] = args.inter_neuron_type_nonlinearity
+    if args.inter_neuron_type_spatial_extents is not None:
+        if args.inter_neuron_type_spatial_extents in ("center_excitation", "center_inhibition"):
+            overrides["inter_neuron_type_spatial_extents"] = args.inter_neuron_type_spatial_extents
+        else:
+            h, w = [int(x) for x in args.inter_neuron_type_spatial_extents.split(",")]
+            overrides["inter_neuron_type_spatial_extents"] = (h, w)
+    if args.output_area_index is not None:
+        overrides["output_area_index"] = args.output_area_index
+    return overrides
+
+def _apply_cnn_overrides(model_config: dict, args) -> dict:
+    cfg = copy.deepcopy(model_config)
+    if args.fc_dim is not None:
+        cfg["fc_dim"] = args.fc_dim
+    if args.conv1_out is not None:
+        cfg["conv1_out"] = args.conv1_out
+    if args.conv2_out is not None:
+        cfg["conv2_out"] = args.conv2_out
+    if args.conv3_out is not None:
+        cfg["conv3_out"] = args.conv3_out
+    return cfg
+
+def _apply_dataset_adaptation(dataset: str, model_type: str, model_config: dict, args):
+    cfg = copy.deepcopy(model_config)
+    dots_kwargs = {}
+    n_frames_range = None
+    num_steps = args.num_steps
+
+    if dataset == "mazes":
+        if "rnn_kwargs" in cfg:
+            areas = cfg["rnn_kwargs"]["area_kwargs"]
+            areas[0]["in_channels"] = 4
+            areas[0]["in_size"] = (48, 48)
+            for i in range(1, len(areas)):
+                areas[i]["in_channels"] = areas[i - 1]["out_channels"]
+                areas[i]["in_size"] = areas[i - 1]["in_size"]
+        else:
+            cfg["in_channels"] = 4
+        cfg["num_classes"] = 2
+
+    elif dataset == "correlated_dots":
+        # Parse directions from CLI
+        directions = None
+        if hasattr(args, 'directions') and args.directions is not None:
+            directions = [int(d) for d in args.directions.split(",")]
+
+        if "rnn_kwargs" in cfg:
+            areas = cfg["rnn_kwargs"]["area_kwargs"]
+            areas[0]["in_channels"] = 1
+            areas[0]["in_size"] = (args.resolution, args.resolution)
+            for i in range(1, len(areas)):
+                areas[i]["in_channels"] = areas[i - 1]["out_channels"]
+                areas[i]["in_size"] = areas[i - 1]["in_size"]
+        else:
+            if not isinstance(args.n_frames, int):
+                raise NotImplementedError("CNN Not Yet Compatible With N_Frames Range")
+            cfg["in_channels"] = args.n_frames
+        # num_classes = number of selected directions (default 8 cardinal+intercardinal)
+        cfg["num_classes"] = len(directions) if directions is not None else 8
+        num_steps = None
+
+        if isinstance(args.n_frames, tuple):
+            dots_kwargs["n_frames"] = args.n_frames[1]
+            n_frames_range = args.n_frames
+        else:
+            dots_kwargs["n_frames"] = args.n_frames
+        dots_kwargs["resolution"] = None if args.resolution is None else (args.resolution, args.resolution)
+        dots_kwargs["correlation"] = args.correlation
+        dots_kwargs["max_speed"] = args.max_speed
+        if directions is not None:
+            dots_kwargs["directions"] = directions
+        if args.num_samples is not None:
+            dots_kwargs["samples_per_epoch"] = args.num_samples
+
+    elif dataset == "cabc":
+        if "rnn_kwargs" in cfg:
+            areas = cfg["rnn_kwargs"]["area_kwargs"]
+            areas[0]["in_channels"] = 1
+            areas[0]["in_size"] = (args.resolution, args.resolution)
+            for i in range(1, len(areas)):
+                areas[i]["in_channels"] = areas[i - 1]["out_channels"]
+                areas[i]["in_size"] = areas[i - 1]["in_size"]
+        else:
+            cfg["in_channels"] = 1
+        cfg["num_classes"] = 2
+
+    return cfg, dots_kwargs, n_frames_range, num_steps
+
+def _build_training_plan(args):
+    base_model_config = _load_model_config(args)
+    scheduler_cfg = _build_scheduler_cfg(args)
+    data_root = _select_data_root(args.dataset)
+
+    if "cnn" in args.model_type:
+        model_config = _apply_cnn_overrides(base_model_config, args)
+        num_steps = None
+    else:
+        overrides = _collect_non_cnn_overrides(args)
+        model_config = apply_model_overrides(args.model_type, base_model_config, overrides) if overrides else base_model_config
+        num_steps = args.num_steps
+
+    if args.loss_all_timesteps:
+        model_config = copy.deepcopy(model_config)
+        model_config["loss_all_timesteps"] = True
+
+    model_config, dots_kwargs, n_frames_range, num_steps = _apply_dataset_adaptation(
+        args.dataset, args.model_type, model_config, args
+    )
+
+    plan = {
+        "model_type": args.model_type,
+        "model_config": model_config,
+        "dataset": args.dataset,
+        "lr": args.lr,
+        "num_steps": num_steps,
+        "max_epochs": args.max_epochs,
+        "batch_size": args.batch_size,
+        "max_gradient": args.max_gradient,
+        "scheduler_config": scheduler_cfg,
+        "init_weights": args.init_weights,
+        "neuron_type_nonlinearity": args.neuron_type_nonlinearity if args.neuron_type_nonlinearity is not None else "relu",
+        "data_root": data_root,
+        "checkpoints_dir": args.checkpoints_dir,
+        "wandb_project": args.wandb_project,
+        "seed": args.seed,
+        "n_frames_range": n_frames_range,
+        "dots_kwargs": dots_kwargs,
+        "num_samples": args.num_samples,
+        "resolution": args.resolution,
+        "extra_config": {k: _to_serializable(v) for k, v in vars(args).items()},
+        "loss_all_timesteps": args.loss_all_timesteps,
+        "output_area_index": args.output_area_index,
+    }
+    return plan
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train a single model on a dataset")
 
@@ -954,19 +1070,23 @@ if __name__ == "__main__":
 
     # Training hyperparameters
     parser.add_argument("--lr", type=float, default=0.001)
-    parser.add_argument("--num-samples", type=int, default=100)
-    parser.add_argument("--num-steps", type=int, default=60)
+    parser.add_argument("--num-steps", type=int, default=None)
     parser.add_argument("--max-epochs", type=int, default=10)
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--max-gradient", type=float, default=None)
     parser.add_argument("--init-weights", type=str, default="kaiming", choices=["kaiming", "zero", "none"])
-    parser.add_argument("--fc-dim", type=int, default=None, help="Override fully connected layer width for non-CNN models")
+    parser.add_argument("--fc-dim", type=int, default=None, help="Override fully connected layer width (CNNs and non-CNNs)")
+    parser.add_argument("--conv1-out", type=int, default=None, help="CNN conv1 out channels")
+    parser.add_argument("--conv2-out", type=int, default=None, help="CNN conv2 out channels")
+    parser.add_argument("--conv3-out", type=int, default=None, help="CNN conv3 out channels")
     parser.add_argument("--out-channels", type=int, default=None, help="Override out_channels in area 0 for non-CNN models")
     parser.add_argument("--num-neuron-subtypes", type=str, default=None, help="Override number of neuron subtypes; either an int or comma-separated list like 8,4")
     parser.add_argument("--neuron-type-nonlinearity", type=str, default=None, help="Override neuron_type_nonlinearity for area 0")
     parser.add_argument("--inter-neuron-type-nonlinearity", type=str, default=None, help="Fill the inter-neuron type nonlinearity matrix with a single value (e.g., ReLU)")
     parser.add_argument("--inter-neuron-type-spatial-extents", type=str, default=None, help='Either a tuple like "5,5" or a keyword: center_excitation | center_inhibition')
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--loss-all-timesteps", action="store_true", help="If true, compute loss for all timesteps")
+    parser.add_argument("--output-area-index", type=int, default=-1, help="Override output area index")
 
     # Scheduler options
     parser.add_argument("--scheduler", type=str, default="none", choices=["none", "onecycle", "lambda"],
@@ -976,7 +1096,6 @@ if __name__ == "__main__":
     parser.add_argument("--warmup-epochs", type=int, default=50, help="LambdaLR warmup epochs")
 
     # Paths and logging
-    parser.add_argument("--data-root", type=str, default=maze_data_path)
     parser.add_argument("--checkpoints-dir", type=str, default=checkpoint_path)
     parser.add_argument("--wandb-project", action="store_true", help="If true, enable Weights & Biases logging to this project")
 
@@ -987,28 +1106,20 @@ if __name__ == "__main__":
 
     # Correlated Dots Args
     parser.add_argument("--n-frames", type=parse_tuple, default=40)
-    parser.add_argument("--resolution", type=int, default=128)
-    parser.add_argument("--correlation", type=parse_tuple, default=0.5)
+    parser.add_argument("--resolution", type=int, default=None)
+    parser.add_argument("--correlation", type=parse_tuple, default=[0.2, 0.75])
     parser.add_argument("--max-speed", type=parse_tuple, default=1)
-    parser.add_argument("--samples-per-epoch", type=int, default=10000)
+    parser.add_argument("--num-samples", type=int, default=None,
+                        help="Limit samples per split (or generator size for correlated_dots)")
+    parser.add_argument("--directions", type=str, default=None,
+                        help="Comma-separated list of direction indices to use for correlated_dots (e.g. '0,1,2,3')")
 
     args = parser.parse_args()
 
-    # Build model_config from preset or file
-    if args.model_config_file is not None:
-        with open(args.model_config_file, "r") as f:
-            model_config = json.load(f)
-    else:
-        model_config = copy.deepcopy(BASE_MODEL_CONFIGS[args.model_type])
+    plan = _build_training_plan(args)
+    scheduler_cfg = plan["scheduler_config"]
+    data_root = plan["data_root"]
 
-    # Build scheduler config
-    scheduler_cfg = None
-    if args.scheduler == "onecycle":
-        scheduler_cfg = {"name": "OneCycleLR", "kwargs": {"pct_start": args.pct_start, "anneal_strategy": 'cos', "div_factor": args.div_factor}}
-    elif args.scheduler == "lambda":
-        scheduler_cfg = {"name": "LambdaLR", "warmup_epochs": args.warmup_epochs, "kwargs": {}}
-
-    # Resume if requested
     if args.resume:
         if args.resume_name is None or args.resume_epoch is None:
             raise ValueError("--resume requires --resume-name and --resume-epoch")
@@ -1016,103 +1127,43 @@ if __name__ == "__main__":
             wandb_name=args.resume_name,
             epoch=args.resume_epoch,
             new_params={
-                "lr": args.lr,
-                "num_steps": args.num_steps,
-                "max_epochs": args.max_epochs,
-                "batch_size": args.batch_size,
-                "max_gradient": args.max_gradient,
+                "lr": plan["lr"],
+                "num_steps": plan["num_steps"],
+                "max_epochs": plan["max_epochs"],
+                "batch_size": plan["batch_size"],
+                "max_gradient": plan["max_gradient"],
                 "scheduler": scheduler_cfg,
-                "init_weights": args.init_weights,
-                "seed": args.seed,
+                "init_weights": plan["init_weights"],
+                "seed": plan["seed"],
+                "num_samples": plan["num_samples"],
             },
-            checkpoints_dir=args.checkpoints_dir,
-            data_root=args.data_root,
-            wandb_project=args.wandb_project,
+            checkpoints_dir=plan["checkpoints_dir"],
+            data_root=data_root,
+            wandb_project=plan["wandb_project"],
+            cli_args={k: _to_serializable(v) for k, v in vars(args).items()},
         )
     else:
-        # Prepare model overrides from CLI for non-CNN models
-        overrides = {}
-        if args.fc_dim is not None: overrides["fc_dim"] = args.fc_dim
-        if args.out_channels is not None: overrides["out_channels"] = args.out_channels
-        if args.num_neuron_subtypes is not None:
-            try:
-                # Try to parse as int
-                overrides["num_neuron_subtypes"] = int(args.num_neuron_subtypes)
-            except ValueError:
-                overrides["num_neuron_subtypes"] = [int(x) for x in args.num_neuron_subtypes.split(",")]
-        if args.neuron_type_nonlinearity is not None:
-            overrides["neuron_type_nonlinearity"] = args.neuron_type_nonlinearity
-        if args.inter_neuron_type_nonlinearity is not None:
-            overrides["inter_neuron_type_nonlinearity"] = args.inter_neuron_type_nonlinearity
-        if args.inter_neuron_type_spatial_extents is not None:
-            if args.inter_neuron_type_spatial_extents in ("center_excitation", "center_inhibition"):
-                overrides["inter_neuron_type_spatial_extents"] = args.inter_neuron_type_spatial_extents
-            else:
-                h, w = [int(x) for x in args.inter_neuron_type_spatial_extents.split(",")]
-                overrides["inter_neuron_type_spatial_extents"] = (h, w)
-
-        # Apply overrides for non-CNN models
-        effective_model_config = apply_model_overrides(args.model_type, model_config, overrides) if overrides and "cnn" not in args.model_type else model_config
-
-        # Adjust input config based on dataset
-        if args.dataset == "mazes":
-            if "rnn_kwargs" in effective_model_config:
-                for area in effective_model_config["rnn_kwargs"]["area_kwargs"]:
-                    area["in_channels"] = 4
-                    area["in_size"] = (48, 48)
-            else:
-                effective_model_config["in_channels"] = 4  # for CNN presets
-            effective_model_config["num_classes"] = 2
-
-        elif args.dataset == "correlated_dots":
-            if "rnn_kwargs" in effective_model_config:
-                for area in effective_model_config["rnn_kwargs"]["area_kwargs"]:
-                    area["in_channels"] = 1
-                    area["in_size"] = (args.resolution, args.resolution)
-            else:
-                if not isinstance(args.n_frames, int):
-                    raise NotImplementedError("CNN Not Yet Compatible With N_Frames Range")
-                effective_model_config["in_channels"] = args.n_frames
-            effective_model_config["num_classes"] = 8
-
-        elif args.dataset == "cabc":
-            if "rnn_kwargs" in effective_model_config:
-                for area in effective_model_config["rnn_kwargs"]["area_kwargs"]:
-                    area["in_channels"] = 1
-                    area["in_size"] = (350, 350)
-            effective_model_config["num_classes"] = 2
-    
-        dots_kwargs = {}
-        n_frames_range = None
-        if args.dataset == "correlated_dots":
-            if isinstance(args.n_frames, tuple):
-                dots_kwargs["n_frames"] = args.n_frames[1]
-                n_frames_range = args.n_frames
-            else:
-                dots_kwargs["n_frames"] = args.n_frames
-            dots_kwargs["resolution"] = None if args.resolution is None else (args.resolution, args.resolution)
-            dots_kwargs["correlation"] = args.correlation
-            dots_kwargs["max_speed"] = args.max_speed
-            dots_kwargs["samples_per_epoch"] = args.samples_per_epoch
-            args.num_steps = None
-
-        # Train fresh run
         run_experiment(
-            model_type=args.model_type,
-            model_config=effective_model_config,
-            dataset=args.dataset,
-            lr=args.lr,
-            num_steps=args.num_steps,
-            max_epochs=args.max_epochs,
-            batch_size=args.batch_size,
-            max_gradient=args.max_gradient,
+            model_type=plan["model_type"],
+            model_config=plan["model_config"],
+            dataset=plan["dataset"],
+            lr=plan["lr"],
+            num_steps=plan["num_steps"],
+            max_epochs=plan["max_epochs"],
+            batch_size=plan["batch_size"],
+            max_gradient=plan["max_gradient"],
             scheduler_config=scheduler_cfg,
-            init_weights=args.init_weights,
-            neuron_type_nonlinearity=args.neuron_type_nonlinearity if args.neuron_type_nonlinearity is not None else "relu",
-            data_root=args.data_root,
-            checkpoints_dir=args.checkpoints_dir,
-            wandb_project=args.wandb_project,
-            seed=args.seed,
-            n_frames_range=n_frames_range,
-            dots_kwargs=dots_kwargs
+            init_weights=plan["init_weights"],
+            neuron_type_nonlinearity=plan["neuron_type_nonlinearity"],
+            data_root=data_root,
+            checkpoints_dir=plan["checkpoints_dir"],
+            wandb_project=plan["wandb_project"],
+            seed=plan["seed"],
+            n_frames_range=plan["n_frames_range"],
+            dots_kwargs=plan["dots_kwargs"],
+            num_samples=plan["num_samples"],
+            resolution=plan["resolution"],
+            extra_config=plan["extra_config"],
+            loss_all_timesteps=plan["loss_all_timesteps"],
+            output_area_index=plan["output_area_index"],
         )

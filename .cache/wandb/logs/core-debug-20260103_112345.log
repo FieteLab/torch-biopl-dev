@@ -1,0 +1,6 @@
+{"time":"2026-01-03T11:23:45.286902645-05:00","level":"INFO","msg":"main: starting server","port-filename":"/tmp/tmpefuizbi8/port-2546870.txt","pid":2546870,"log-level":0,"disable-analytics":false,"shutdown-on-parent-exit":false,"enable-dcgm-profiling":false}
+{"time":"2026-01-03T11:23:45.287621455-05:00","level":"INFO","msg":"server: accepting connections","addr":{"Name":"/tmp/wandb-2546870-2546974-915591500/socket","Net":"unix"}}
+{"time":"2026-01-03T11:23:45.287741535-05:00","level":"INFO","msg":"server: will exit if parent process dies","ppid":2546870}
+{"time":"2026-01-03T11:23:45.464727093-05:00","level":"INFO","msg":"connection: ManageConnectionData: new connection created","id":"1(@)"}
+{"time":"2026-01-03T11:23:45.472092722-05:00","level":"INFO","msg":"handleInformInit: received","streamId":"on9ozbn5","id":"1(@)"}
+{"time":"2026-01-03T11:23:45.70996637-05:00","level":"INFO","msg":"handleInformInit: stream started","streamId":"on9ozbn5","id":"1(@)"}

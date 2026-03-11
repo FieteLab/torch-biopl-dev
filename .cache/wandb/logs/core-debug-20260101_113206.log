@@ -1,0 +1,6 @@
+{"time":"2026-01-01T11:32:06.590862733-05:00","level":"INFO","msg":"main: starting server","port-filename":"/tmp/tmpl2_9i10z/port-1982529.txt","pid":1982529,"log-level":0,"disable-analytics":false,"shutdown-on-parent-exit":false,"enable-dcgm-profiling":false}
+{"time":"2026-01-01T11:32:06.591504103-05:00","level":"INFO","msg":"server: accepting connections","addr":{"Name":"/tmp/wandb-1982529-1982579-20969767/socket","Net":"unix"}}
+{"time":"2026-01-01T11:32:06.591716223-05:00","level":"INFO","msg":"server: will exit if parent process dies","ppid":1982529}
+{"time":"2026-01-01T11:32:06.778947617-05:00","level":"INFO","msg":"connection: ManageConnectionData: new connection created","id":"1(@)"}
+{"time":"2026-01-01T11:32:06.78412613-05:00","level":"INFO","msg":"handleInformInit: received","streamId":"g99wtlgp","id":"1(@)"}
+{"time":"2026-01-01T11:32:07.008289765-05:00","level":"INFO","msg":"handleInformInit: stream started","streamId":"g99wtlgp","id":"1(@)"}

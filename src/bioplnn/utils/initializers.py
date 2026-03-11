@@ -17,6 +17,13 @@ def initialize_dataloader(**kwargs):
         tuple[torch.utils.data.DataLoader, torch.utils.data.DataLoader]: The train and validation dataloaders.
     """
     dataset = kwargs.pop("dataset")
+    # Generic samples-per-epoch controls for non-correlated_dots datasets
+    # For correlated_dots, samples_per_epoch is handled inside its dataloader
+    spe: Optional[int] = None
+    val_spe: Optional[int] = None
+    if dataset != "correlated_dots":
+        spe = kwargs.pop("samples_per_epoch", None)
+        val_spe = kwargs.pop("val_samples_per_epoch", None)
     if dataset == "mnist":
         train_loader, val_loader = dataloaders.get_mnist_dataloaders(**kwargs)
     elif dataset == "cifar10":
@@ -50,6 +57,60 @@ def initialize_dataloader(**kwargs):
         train_loader, val_loader = dataloaders.get_correlated_dots_dataloaders(**kwargs)
     else:
         raise ValueError(f"Dataset {dataset} not implemented")
+
+    # If requested, subset non-correlated datasets to a fixed number of samples per epoch
+    if dataset != "correlated_dots" and spe is not None:
+        try:
+            import random
+            from torch.utils.data import Subset, DataLoader
+
+            seed = kwargs.get("seed")
+            rng = random.Random(seed)
+
+            # Subset train
+            train_dataset = train_loader.dataset
+            total_train = len(train_dataset)  # type: ignore
+            if spe < total_train:
+                train_indices = rng.sample(range(total_train), k=spe)
+                train_subset = Subset(train_dataset, train_indices)
+                train_loader = DataLoader(
+                    train_subset,
+                    batch_size=train_loader.batch_size,
+                    shuffle=True,
+                    num_workers=train_loader.num_workers,
+                    pin_memory=train_loader.pin_memory,
+                    worker_init_fn=train_loader.worker_init_fn,
+                    generator=train_loader.generator,
+                )
+
+            # Subset val proportionally (or to provided val_spe)
+            if val_loader is not None:
+                val_dataset = val_loader.dataset
+                total_val = len(val_dataset)  # type: ignore
+                if total_train > 0:
+                    target_val = (
+                        val_spe
+                        if val_spe is not None
+                        else int(round(min(spe, total_train) * total_val / total_train))
+                    )
+                else:
+                    target_val = val_spe if val_spe is not None else total_val
+                target_val = max(0, min(target_val, total_val))
+                if target_val < total_val:
+                    val_indices = rng.sample(range(total_val), k=target_val)
+                    val_subset = Subset(val_dataset, val_indices)
+                    val_loader = DataLoader(
+                        val_subset,
+                        batch_size=val_loader.batch_size,
+                        shuffle=False,
+                        num_workers=val_loader.num_workers,
+                        pin_memory=val_loader.pin_memory,
+                        worker_init_fn=val_loader.worker_init_fn,
+                        generator=val_loader.generator,
+                    )
+        except Exception:
+            # Fall back silently if any dataset does not support len()/indexing
+            pass
 
     return train_loader, val_loader
 

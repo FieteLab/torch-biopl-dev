@@ -1,0 +1,6 @@
+{"time":"2026-03-04T03:09:57.723919118-05:00","level":"INFO","msg":"main: starting server","port-filename":"/tmp/tmph_yxtwpv/port-99263.txt","pid":99263,"log-level":0,"disable-analytics":false,"shutdown-on-parent-exit":false,"enable-dcgm-profiling":false}
+{"time":"2026-03-04T03:09:57.724673488-05:00","level":"INFO","msg":"server: accepting connections","addr":{"Name":"/tmp/wandb-99263-99289-2222132701/socket","Net":"unix"}}
+{"time":"2026-03-04T03:09:57.724750648-05:00","level":"INFO","msg":"server: will exit if parent process dies","ppid":99263}
+{"time":"2026-03-04T03:09:57.912142136-05:00","level":"INFO","msg":"connection: ManageConnectionData: new connection created","id":"1(@)"}
+{"time":"2026-03-04T03:09:57.918392561-05:00","level":"INFO","msg":"handleInformInit: received","streamId":"i4105jbt","id":"1(@)"}
+{"time":"2026-03-04T03:09:58.145408672-05:00","level":"INFO","msg":"handleInformInit: stream started","streamId":"i4105jbt","id":"1(@)"}

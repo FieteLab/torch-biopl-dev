@@ -191,6 +191,10 @@ class SpatiallyEmbeddedAreaConfig:
         """
         return asdict(self)
 
+    def to_dict(self) -> dict[str, Any]:
+        """Return a dict preserving original value types (e.g., numpy arrays)."""
+        return copy.deepcopy(self.asdict())
+
     @staticmethod
     def inter_neuron_type_connectivity_template_df(
         use_feedback: bool, num_neuron_types: int
@@ -513,36 +517,38 @@ class SpatiallyEmbeddedArea(nn.Module):
                 "rows and columns in the connectivity matrix."
             )
 
-        #Format connectivity variables to match circuit connectivity
-        if not isinstance(config.inter_neuron_type_spatial_extents, np.ndarray):
-            self.inter_neuron_type_spatial_extents = expand_array_2d(
-                config.inter_neuron_type_spatial_extents,
-                self.inter_neuron_type_connectivity.shape[0],
-                self.inter_neuron_type_connectivity.shape[1],
-                depth=1,
-            )
-        else:
-            self.inter_neuron_type_spatial_extents = config.inter_neuron_type_spatial_extents
-        # self.inter_neuron_type_spatial_extents = expand_array_2d(
-        #         config.inter_neuron_type_spatial_extents,
-        #         self.inter_neuron_type_connectivity.shape[0],
-        #         self.inter_neuron_type_connectivity.shape[1],
-        #         depth=1,
-        # )
-        self.inter_neuron_type_num_subtype_groups = expand_array_2d(
-            config.inter_neuron_type_num_subtype_groups,
-            self.inter_neuron_type_connectivity.shape[0],
-            self.inter_neuron_type_connectivity.shape[1],
+        def _as_array_or_expand(val, H, W, *, depth=None):
+            """
+            If val is already array-like (list/ndarray), return as ndarray.
+            Otherwise treat as a scalar-ish config value and expand to (H, W).
+            """
+            if isinstance(val, np.ndarray):
+                return val
+            if isinstance(val, list):
+                return np.array(val)
+        
+            kwargs = {}
+            if depth is not None:
+                kwargs["depth"] = depth
+            return expand_array_2d(val, H, W, **kwargs)
+
+
+        H, W = self.inter_neuron_type_connectivity.shape[:2]
+
+        self.inter_neuron_type_spatial_extents = _as_array_or_expand(
+            config.inter_neuron_type_spatial_extents, H, W, depth=1
         )
-        self.inter_neuron_type_nonlinearity = expand_array_2d(
-            config.inter_neuron_type_nonlinearity,
-            self.inter_neuron_type_connectivity.shape[0],
-            self.inter_neuron_type_connectivity.shape[1],
+
+        self.inter_neuron_type_num_subtype_groups = _as_array_or_expand(
+            config.inter_neuron_type_num_subtype_groups, H, W
         )
-        self.inter_neuron_type_bias = expand_array_2d(
-            config.inter_neuron_type_bias,
-            self.inter_neuron_type_connectivity.shape[0],
-            self.inter_neuron_type_connectivity.shape[1],
+
+        self.inter_neuron_type_nonlinearity = _as_array_or_expand(
+            config.inter_neuron_type_nonlinearity, H, W
+        )
+
+        self.inter_neuron_type_bias = _as_array_or_expand(
+            config.inter_neuron_type_bias, H, W
         )
 
         #####################################################################
@@ -1205,6 +1211,9 @@ class SpatiallyEmbeddedRNN(nn.Module):
                     f"channels of area {i + 1}."
                 )
 
+        # Preserve a copy of the provided configs for serialization
+        self._area_configs = [copy.deepcopy(cfg) for cfg in area_configs]
+
         ############################################################
         # RNN parameters
         ############################################################
@@ -1815,3 +1824,26 @@ class SpatiallyEmbeddedRNN(nn.Module):
         )
 
         return output_states, neuron_states, feedback_states
+
+    def get_config(self) -> dict[str, Any]:
+        """Return a config preserving original value types for pickling."""
+        cfg: dict[str, Any] = {
+            "num_areas": int(self.num_areas),
+            "area_kwargs": [copy.deepcopy(cfg.to_dict()) for cfg in self._area_configs],
+            "area_time_delay": bool(self.area_time_delay),
+            "pool_mode": self.pool_mode,
+            "batch_first": bool(self.batch_first),
+        }
+        if hasattr(self, "inter_area_feedback_connectivity"):
+            cfg["inter_area_feedback_connectivity"] = copy.deepcopy(
+                self.inter_area_feedback_connectivity
+            )
+        if hasattr(self, "inter_area_feedback_nonlinearity"):
+            cfg["inter_area_feedback_nonlinearity"] = copy.deepcopy(
+                self.inter_area_feedback_nonlinearity
+            )
+        if hasattr(self, "inter_area_feedback_spatial_extents"):
+            cfg["inter_area_feedback_spatial_extents"] = copy.deepcopy(
+                self.inter_area_feedback_spatial_extents
+            )
+        return cfg

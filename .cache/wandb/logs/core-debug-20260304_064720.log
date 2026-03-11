@@ -1,0 +1,6 @@
+{"time":"2026-03-04T06:47:20.653766324-05:00","level":"INFO","msg":"main: starting server","port-filename":"/tmp/tmpilg2e14l/port-118719.txt","pid":118719,"log-level":0,"disable-analytics":false,"shutdown-on-parent-exit":false,"enable-dcgm-profiling":false}
+{"time":"2026-03-04T06:47:20.654084245-05:00","level":"INFO","msg":"server: accepting connections","addr":{"Name":"/tmp/wandb-118719-118761-3679756471/socket","Net":"unix"}}
+{"time":"2026-03-04T06:47:20.654178655-05:00","level":"INFO","msg":"server: will exit if parent process dies","ppid":118719}
+{"time":"2026-03-04T06:47:20.840269869-05:00","level":"INFO","msg":"connection: ManageConnectionData: new connection created","id":"1(@)"}
+{"time":"2026-03-04T06:47:20.845396625-05:00","level":"INFO","msg":"handleInformInit: received","streamId":"nfeamg88","id":"1(@)"}
+{"time":"2026-03-04T06:47:21.074922069-05:00","level":"INFO","msg":"handleInformInit: stream started","streamId":"nfeamg88","id":"1(@)"}

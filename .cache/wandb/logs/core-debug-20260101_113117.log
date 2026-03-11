@@ -1,0 +1,6 @@
+{"time":"2026-01-01T11:31:17.53372605-05:00","level":"INFO","msg":"main: starting server","port-filename":"/tmp/tmpt5bi_bq8/port-1981348.txt","pid":1981348,"log-level":0,"disable-analytics":false,"shutdown-on-parent-exit":false,"enable-dcgm-profiling":false}
+{"time":"2026-01-01T11:31:17.53411328-05:00","level":"INFO","msg":"server: will exit if parent process dies","ppid":1981348}
+{"time":"2026-01-01T11:31:17.53413459-05:00","level":"INFO","msg":"server: accepting connections","addr":{"Name":"/tmp/wandb-1981348-1981393-2493014178/socket","Net":"unix"}}
+{"time":"2026-01-01T11:31:17.719543514-05:00","level":"INFO","msg":"connection: ManageConnectionData: new connection created","id":"1(@)"}
+{"time":"2026-01-01T11:31:17.725053147-05:00","level":"INFO","msg":"handleInformInit: received","streamId":"i2cx0g7l","id":"1(@)"}
+{"time":"2026-01-01T11:31:17.950841682-05:00","level":"INFO","msg":"handleInformInit: stream started","streamId":"i2cx0g7l","id":"1(@)"}

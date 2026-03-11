@@ -248,6 +248,13 @@ def get_correlated_dots_dataloaders(
     batch_size: int = 512,
     num_workers: int = 0,
     seed: Optional[int] = None,
+    directions: Optional[list[int]] = None,
+    num_bars: int = 0,
+    bar_width: int = 4,
+    dot_shape: str = 'point',
+    dot_radius: int = 3,
+    jitter_speed: float = 0.0,
+    evidence_pulses: Optional[list[tuple[int, int, int]]] = None,
 ) -> tuple[DataLoader, DataLoader]:
     from bioplnn.datasets.correlated_dots import CorrelatedDots
 
@@ -258,6 +265,13 @@ def get_correlated_dots_dataloaders(
         correlation=correlation,
         max_speed=max_speed,
         samples_per_epoch=samples_per_epoch,
+        directions=directions,
+        num_bars=num_bars,
+        bar_width=bar_width,
+        dot_shape=dot_shape,
+        dot_radius=dot_radius,
+        jitter_speed=jitter_speed,
+        evidence_pulses=evidence_pulses,
     )
 
     val_dataset = CorrelatedDots(
@@ -267,6 +281,13 @@ def get_correlated_dots_dataloaders(
         correlation=correlation,
         max_speed=max_speed,
         samples_per_epoch=val_samples_per_epoch,
+        directions=directions,
+        num_bars=num_bars,
+        bar_width=bar_width,
+        dot_shape=dot_shape,
+        dot_radius=dot_radius,
+        jitter_speed=jitter_speed,
+        evidence_pulses=evidence_pulses,
     )
 
     train_dataloader = DataLoader(

@@ -1,0 +1,6 @@
+{"time":"2025-11-25T01:33:06.718994979-05:00","level":"INFO","msg":"main: starting server","port-filename":"/tmp/tmpzh5_eiur/port-2790047.txt","pid":2790047,"log-level":0,"disable-analytics":false,"shutdown-on-parent-exit":false,"enable-dcgm-profiling":false}
+{"time":"2025-11-25T01:33:06.719794449-05:00","level":"INFO","msg":"server: will exit if parent process dies","ppid":2790047}
+{"time":"2025-11-25T01:33:06.719917749-05:00","level":"INFO","msg":"server: accepting connections","addr":{"Name":"/tmp/wandb-2790047-2790073-4246516750/socket","Net":"unix"}}
+{"time":"2025-11-25T01:33:06.767568944-05:00","level":"INFO","msg":"connection: ManageConnectionData: new connection created","id":"1(@)"}
+{"time":"2025-11-25T01:33:06.777260287-05:00","level":"INFO","msg":"handleInformInit: received","streamId":"qvkfnruf","id":"1(@)"}
+{"time":"2025-11-25T01:33:07.007933636-05:00","level":"INFO","msg":"handleInformInit: stream started","streamId":"qvkfnruf","id":"1(@)"}

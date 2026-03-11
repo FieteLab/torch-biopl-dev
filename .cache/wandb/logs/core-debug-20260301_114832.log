@@ -1,0 +1,6 @@
+{"time":"2026-03-01T11:48:32.561340873-05:00","level":"INFO","msg":"main: starting server","port-filename":"/tmp/tmpg521si5g/port-2055940.txt","pid":2055940,"log-level":0,"disable-analytics":false,"shutdown-on-parent-exit":false,"enable-dcgm-profiling":false}
+{"time":"2026-03-01T11:48:32.561791394-05:00","level":"INFO","msg":"server: will exit if parent process dies","ppid":2055940}
+{"time":"2026-03-01T11:48:32.564135246-05:00","level":"INFO","msg":"server: accepting connections","addr":{"Name":"/tmp/wandb-2055940-2056722-774778102/socket","Net":"unix"}}
+{"time":"2026-03-01T11:48:32.573662047-05:00","level":"INFO","msg":"connection: ManageConnectionData: new connection created","id":"1(@)"}
+{"time":"2026-03-01T11:48:32.589010945-05:00","level":"INFO","msg":"handleInformInit: received","streamId":"fn0qppk5","id":"1(@)"}
+{"time":"2026-03-01T11:48:32.938775778-05:00","level":"INFO","msg":"handleInformInit: stream started","streamId":"fn0qppk5","id":"1(@)"}

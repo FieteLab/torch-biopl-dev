@@ -1,0 +1,6 @@
+{"time":"2026-01-05T11:24:29.391116184-05:00","level":"INFO","msg":"main: starting server","port-filename":"/tmp/tmp5k0nocz9/port-3953082.txt","pid":3953082,"log-level":0,"disable-analytics":false,"shutdown-on-parent-exit":false,"enable-dcgm-profiling":false}
+{"time":"2026-01-05T11:24:29.396877631-05:00","level":"INFO","msg":"server: accepting connections","addr":{"Name":"/tmp/wandb-3953082-3953124-4054254272/socket","Net":"unix"}}
+{"time":"2026-01-05T11:24:29.3992181-05:00","level":"INFO","msg":"server: will exit if parent process dies","ppid":3953082}
+{"time":"2026-01-05T11:24:29.549428312-05:00","level":"INFO","msg":"connection: ManageConnectionData: new connection created","id":"1(@)"}
+{"time":"2026-01-05T11:24:29.570721541-05:00","level":"INFO","msg":"handleInformInit: received","streamId":"ap6920np","id":"1(@)"}
+{"time":"2026-01-05T11:24:29.830699546-05:00","level":"INFO","msg":"handleInformInit: stream started","streamId":"ap6920np","id":"1(@)"}

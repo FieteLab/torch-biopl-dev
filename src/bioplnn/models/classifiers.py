@@ -3,6 +3,7 @@ from typing import Any, List, Optional, Tuple, Union
 
 import torch
 from torch import nn
+import copy
 
 from bioplnn.models.connectome import ConnectomeODERNN, ConnectomeRNN
 from bioplnn.models.spatially_embedded import SpatiallyEmbeddedRNN
@@ -207,10 +208,18 @@ class SpatiallyEmbeddedClassifier(nn.Module):
         pool_mode_classifier: str = "max",
         fc_dim: int = 512,
         dropout: float = 0.2,
+        output_area_index: int = -1,
     ):
         super().__init__()
 
         self.rnn = SpatiallyEmbeddedRNN(**rnn_kwargs)
+        # Must set before using in readout construction below
+        self.output_area_index = output_area_index
+        self.pool_size_classifier = pool_size_classifier
+        self.pool_mode_classifier = pool_mode_classifier
+        self.fc_dim = fc_dim
+        self.dropout = dropout
+        self.num_classes = num_classes
 
         if pool_mode_classifier == "avg":
             self.pool = nn.AdaptiveAvgPool2d(pool_size_classifier)
@@ -222,7 +231,7 @@ class SpatiallyEmbeddedClassifier(nn.Module):
         self.readout = nn.Sequential(
             nn.Flatten(1),
             nn.Linear(
-                self.rnn.areas[-1].out_channels
+                self.rnn.areas[self.output_area_index].out_channels
                 * pool_size_classifier[0]
                 * pool_size_classifier[1],  # type: ignore
                 fc_dim,
@@ -271,13 +280,13 @@ class SpatiallyEmbeddedClassifier(nn.Module):
         """
         outs, h_neurons, fbs = self.rnn(x, num_steps=num_steps, ablater=ablater)
 
-        outs_last_layer = outs[-1]
+        outs_last_layer = outs[self.output_area_index]
         if self.rnn.batch_first:
             outs_last_layer = outs_last_layer.transpose(0, 1)
 
         if loss_all_timesteps:
             pred = torch.stack(
-                [self.readout(self.pool(out)) for out in outs_last_layer]
+                [self.readout(self.pool(out)) for out in outs_last_layer], dim=1
             )
         else:
             pred = self.readout(self.pool(outs_last_layer[-1]))
@@ -286,3 +295,15 @@ class SpatiallyEmbeddedClassifier(nn.Module):
             return pred, outs, h_neurons, fbs
         else:
             return pred
+
+    def get_config(self) -> dict[str, Any]:
+        """Return a config preserving original value types for pickling."""
+        return {
+            "rnn_kwargs": copy.deepcopy(self.rnn.get_config()),
+            "pool_size_classifier": self.pool_size_classifier,
+            "pool_mode_classifier": self.pool_mode_classifier,
+            "fc_dim": self.fc_dim,
+            "dropout": self.dropout,
+            "num_classes": self.num_classes,
+            "output_area_index": self.output_area_index,
+        }

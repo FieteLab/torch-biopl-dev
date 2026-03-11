@@ -1,17 +1,17 @@
 #!/bin/bash
 #SBATCH --job-name=mazes
 #SBATCH --time=2-00:00:00
-##SBATCH --gres=gpu:a100:2
+#SBATCH --gres=gpu:a100:1
 ##SBATCH --gres=gpu:RTXA6000:1
-#SBATCH --gres=gpu:GEFORCERTX2080:2
+##SBATCH --gres=gpu:GEFORCERTX2080:1
 
 #SBATCH --ntasks=1
 #SBATCH --mail-type=ALL
 #SBATCH --mail-user=jackking@mit.edu
-#SBATCH --partition=fiete
+#SBATCH --partition=evlab
 #SBATCH --mem=50G
 
-#SBATCH --output=/om2/vast/evlab/jackking/torch-bioplnn-dev/train/slurm_outputs/output_%j.txt
+#SBATCH --output=/om2/user/jackking/torch-bioplnn-dev/train/slurm_outputs/output_%j.txt
 
 source ~/.bashrc
 
@@ -22,14 +22,30 @@ module load openmind8/cuda/11.7
 USER_NAME=$(whoami)
 unset CUDA_VISIBLE_DEVICES
 
-MT_HOME="/om2/vast/evlab/${USER_NAME}/torch-bioplnn-dev"
+MT_HOME="/om2/user/${USER_NAME}/torch-bioplnn-dev"
 # run the .bash_profile file from USER_NAME home directory
 # . /home/${USER_NAME}/.bash_profile
 
-conda activate bioplnn
+conda activate bioplnn_2.0
 echo $(which python)
 
---data-root
+
+python "${MT_HOME}/scripts/solving_mazes.py" \
+  --model-type 1e1ii1ef1a \
+  --dataset cabc \
+  --lr 0.0012 \
+  --max-gradient 5 \
+  --num-steps 4 \
+  --max-epochs 400 \
+  --batch-size 256 \
+  --fc-dim 512 \
+  --init-weights none \
+  --scheduler onecycle \
+  --pct-start 0.15 \
+  --div-factor 20 \
+  --wandb-project \
+  --seed 4 \
+
 
 # python "${MT_HOME}/scripts/solving_mazes.py" \
 #   --model-type 1e1ii1a \
@@ -39,7 +55,7 @@ echo $(which python)
 #   --num-samples 345600 \
 #   --num-steps 20 \
 #   --max-epochs 400 \
-#   --batch-size 128 \
+#   --batch-size 32 \
 #   --num-neuron-subtypes 8,4 \
 #   --fc-dim 512 \
 #   --out-channels 8 \
@@ -99,19 +115,19 @@ echo $(which python)
 #   --wandb-project mazes \
 #   --seed 3
 
-python "${MT_HOME}/scripts/solving_mazes.py" \
-  --model-type cnn \
-  --lr 0.0008 \
-  --max-gradient 1 \
-  --num-steps 20 \
-  --max-epochs 1800 \
-  --batch-size 64 \
-  --init-weights none \
-  --scheduler onecycle \
-  --pct-start 0.15 \
-  --div-factor 35 \
-  --wandb-project \
-  --seed 1 \
-  --dataset mazes \
-  --correlation 0.25,0.75 \
-  --max-speed 5
+# python "${MT_HOME}/scripts/solving_mazes.py" \
+#   --model-type cnn \
+#   --lr 0.0008 \
+#   --max-gradient 1 \
+#   --num-steps 20 \
+#   --max-epochs 1800 \
+#   --batch-size 64 \
+#   --init-weights none \
+#   --scheduler onecycle \
+#   --pct-start 0.15 \
+#   --div-factor 35 \
+#   --wandb-project \
+#   --seed 1 \
+#   --dataset mazes \
+#   --correlation 0.25,0.75 \
+#   --max-speed 5
